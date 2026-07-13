@@ -101,7 +101,7 @@ def wilcoxon_test(x: list, y: list) -> dict:
     assert len(x) == len(y)
     diffs = [xi - yi for xi, yi in zip(x, y) if xi - yi != 0.0]
     n = len(diffs)
-    if n < 10:  # Too small for normal approximation
+    if n < 10:
         return {"w_statistic": 0.0, "p_value": 1.0, "significant": False}
         
     sorted_diffs = sorted(diffs, key=abs)
@@ -148,7 +148,7 @@ def wilcoxon_test(x: list, y: list) -> dict:
         "significant": p_val < 0.05
     }
 
-def calculate_portfolio_metrics(trade_signals: list) -> dict:
+def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0) -> dict:
     """
     Constructs a daily portfolio equity curve and calculates standard quant metrics.
     trade_signals: list of dicts: {"trade_dates": list of dates, "daily_returns": list of daily returns}
@@ -159,7 +159,13 @@ def calculate_portfolio_metrics(trade_signals: list) -> dict:
     # Map dates to daily returns of active trades
     daily_active_trades = {}
     for sig in trade_signals:
-        for d, ret in zip(sig.get("trade_dates", []), sig.get("daily_returns", [])):
+        rets = list(sig.get("daily_returns", []))
+        dates = list(sig.get("trade_dates", []))
+        if rets and friction_cost > 0.0:
+            # Subtract friction cost from the final day's return of the trade
+            rets[-1] -= friction_cost
+            
+        for d, ret in zip(dates, rets):
             if d not in daily_active_trades:
                 daily_active_trades[d] = []
             daily_active_trades[d].append(ret)
@@ -179,12 +185,10 @@ def calculate_portfolio_metrics(trade_signals: list) -> dict:
     
     sharpe = (ann_return / ann_vol) if ann_vol > 0 else 0.0
     
-    # Downside deviation for Sortino
     neg_rets = portfolio_daily_returns[portfolio_daily_returns < 0]
     downside_std = np.std(neg_rets) * math.sqrt(252) if len(neg_rets) > 0 else 0.0
     sortino = (ann_return / downside_std) if downside_std > 0 else 0.0
     
-    # Max Drawdown
     equity = np.cumprod(1.0 + portfolio_daily_returns)
     peaks = np.maximum.accumulate(equity)
     drawdowns = (equity - peaks) / peaks
@@ -268,7 +272,6 @@ def compute_decision_tree_importance(X_df: pd.DataFrame, y: np.ndarray) -> dict:
     feat_max_reduction = {}
     for fi in range(k):
         feat_vals = X[:, fi]
-        # Use deciles as splits
         thresholds = np.percentile(feat_vals, range(10, 95, 10))
         max_red = 0.0
         best_t_for_feat = None
@@ -302,7 +305,6 @@ def compute_decision_tree_importance(X_df: pd.DataFrame, y: np.ndarray) -> dict:
         "importances": importances
     }
 
-
 def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     loader = DataLoader()
     try:
@@ -317,7 +319,7 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         
     bin_size = 1.0 if symbol in ["2330", "2454", "3034"] else 0.5
     
-    # Precompute rolling SMA_200 and Rolling_VWAP
+    # Precompute SMA_200 and Rolling_VWAP
     df_prices["SMA_200"] = df_prices["Close"].rolling(200).mean()
     rolling_vol = df_prices["Volume"].rolling(20).sum()
     rolling_pv = (df_prices["Close"] * df_prices["Volume"]).rolling(20).sum()
@@ -388,11 +390,13 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                 date_k = row_k["Date"]
                 
                 if low_k <= stop_price:
+                    # Stopped out
                     daily_returns.append((stop_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
                     break
                 elif high_k >= target_price:
+                    # Target met
                     daily_returns.append((target_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
@@ -402,15 +406,18 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                     trade_dates.append(date_k)
                     p_prev = close_k
                     
-            closes_5d = df_prices.iloc[idx:idx+5]["Close"].values
-            lows_5d = df_prices.iloc[idx:idx+5]["Low"].values
-            highs_5d = df_prices.iloc[idx:idx+5]["High"].values
+            # Correct MFE and MAE relative to Entry Price (Open[t+1])
+            lows_5d = df_prices.iloc[idx+1:idx+6]["Low"].values
+            highs_5d = df_prices.iloc[idx+1:idx+6]["High"].values
+            closes_5d = df_prices.iloc[idx+1:idx+6]["Close"].values
             
             success = int(len(closes_5d) > 0 and max(closes_5d) >= peak * 1.02)
-            ret_5d = (df_prices.iloc[idx+5]["Close"] - peak) / peak if peak > 0 else 0.0
-            ret_20d = (df_prices.iloc[idx+20]["Close"] - peak) / peak if peak > 0 else 0.0
-            mae = min((lows_5d - peak) / peak) if (len(lows_5d) > 0 and peak > 0) else 0.0
-            mfe = max((highs_5d - peak) / peak) if (len(highs_5d) > 0 and peak > 0) else 0.0
+            ret_5d = (df_prices.iloc[idx+5]["Close"] - entry_price) / entry_price
+            ret_20d = (df_prices.iloc[idx+20]["Close"] - entry_price) / entry_price
+            
+            # Floor MAE at 0 (or strictly non-positive) and ceiling MFE at 0 (strictly non-negative)
+            mae = min(0.0, min((lows_5d - entry_price) / entry_price)) if len(lows_5d) > 0 else 0.0
+            mfe = max(0.0, max((highs_5d - entry_price) / entry_price)) if len(highs_5d) > 0 else 0.0
             
             return {
                 "entry_date": df_prices.iloc[idx+1]["Date"],
@@ -457,9 +464,45 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     volatility_pct = (df_prices["Close"].pct_change().std() * 100)
     avg_core_pct = (shareholder_concentration["Core_Fraction"].mean() * 100) if shareholder_concentration is not None and not shareholder_concentration.empty else 60.0
     
+    # Split trade signals based on date
+    train_limit = pd.Timestamp("2022-12-31")
+    
+    vp_train = [s for s in vp_signals if s["entry_date"] <= train_limit]
+    vp_test = [s for s in vp_signals if s["entry_date"] > train_limit]
+    
+    v1_train = [s for s in v1_signals if s["entry_date"] <= train_limit]
+    v1_test = [s for s in v1_signals if s["entry_date"] > train_limit]
+    
+    v2_train = [s for s in v2_signals if s["entry_date"] <= train_limit]
+    v2_test = [s for s in v2_signals if s["entry_date"] > train_limit]
+    
+    sma_train = [s for s in sma_signals if s["entry_date"] <= train_limit]
+    sma_test = [s for s in sma_signals if s["entry_date"] > train_limit]
+    
+    vwap_train = [s for s in vwap_signals if s["entry_date"] <= train_limit]
+    vwap_test = [s for s in vwap_signals if s["entry_date"] > train_limit]
+    
+    co_train = [ct for ct in co_touch_records if ct[0] <= train_limit]
+    co_test = [ct for ct in co_touch_records if ct[0] > train_limit]
+    
     return {
         "symbol": symbol,
         "prices": df_prices,
+        # Train signals
+        "vp_train": vp_train,
+        "v1_train": v1_train,
+        "v2_train": v2_train,
+        "sma200_train": sma_train,
+        "vwap20_train": vwap_train,
+        "co_touches_train": co_train,
+        # Test signals
+        "vp_test": vp_test,
+        "v1_test": v1_test,
+        "v2_test": v2_test,
+        "sma200_test": sma_test,
+        "vwap20_test": vwap_test,
+        "co_touches_test": co_test,
+        # Full signals
         "vp": vp_signals,
         "v1": v1_signals,
         "v2": v2_signals,
@@ -503,11 +546,8 @@ def print_quant_ab_test_report(results_list: list):
     all_v1_co_success = []
     all_v2_co_success = []
     
-    first_res = next(r for r in results_list if r is not None)
-    date_index = first_res["prices"]["Date"]
-    
-    # Applicability dataset list
-    app_data = []
+    train_app_data = []
+    test_app_data = []
     
     for r in results_list:
         if r is None: continue
@@ -519,25 +559,44 @@ def print_quant_ab_test_report(results_list: list):
             for k in model_keys:
                 bounce_rates_by_stock[k].append(sum(s["success"] for s in r[k]) / len(r[k]))
                 
-        # Collect stock metrics for regression
-        v1_br = (sum(s["success"] for s in r["v1"]) / len(r["v1"])) if len(r["v1"]) > 0 else 0.0
-        v2_br = (sum(s["success"] for s in r["v2"]) / len(r["v2"])) if len(r["v2"]) > 0 else 0.0
-        vp_br = (sum(s["success"] for s in r["vp"]) / len(r["vp"])) if len(r["vp"]) > 0 else 0.0
+        # 1. Train applicability data (2016-2022)
+        v1_tr_br = (sum(s["success"] for s in r["v1_train"]) / len(r["v1_train"])) if len(r["v1_train"]) > 0 else 0.0
+        vp_tr_br = (sum(s["success"] for s in r["vp_train"]) / len(r["vp_train"])) if len(r["vp_train"]) > 0 else 0.0
+        v2_tr_br = (sum(s["success"] for s in r["v2_train"]) / len(r["v2_train"])) if len(r["v2_train"]) > 0 else 0.0
         
-        app_data.append({
+        train_app_data.append({
             "Symbol": sym,
             "Market_Cap_Bln": r["features"]["Market_Cap_Bln"],
             "Log_Size": math.log(r["features"]["Market_Cap_Bln"]),
             "Turnover_Pct": r["features"]["Turnover_Pct"],
             "Volatility_Pct": r["features"]["Volatility_Pct"],
             "Core_Fraction_Pct": r["features"]["Core_Fraction_Pct"],
-            "V1_Bounce": v1_br,
-            "V2_Bounce": v2_br,
-            "VP_Bounce": vp_br,
-            "V1_Premium": v1_br - vp_br,
-            "V2_Premium": v2_br - vp_br,
-            "V1_vs_V2_Premium": v1_br - v2_br,
-            "V1_Touches": len(r["v1"])
+            "V1_Bounce": v1_tr_br,
+            "V2_Bounce": v2_tr_br,
+            "VP_Bounce": vp_tr_br,
+            "V1_Premium": v1_tr_br - vp_tr_br,
+            "V2_Premium": v2_tr_br - vp_tr_br,
+            "V1_vs_V2_Premium": v1_tr_br - v2_tr_br
+        })
+        
+        # 2. Test applicability data (2023-2026)
+        v1_te_br = (sum(s["success"] for s in r["v1_test"]) / len(r["v1_test"])) if len(r["v1_test"]) > 0 else 0.0
+        vp_te_br = (sum(s["success"] for s in r["vp_test"]) / len(r["vp_test"])) if len(r["vp_test"]) > 0 else 0.0
+        v2_te_br = (sum(s["success"] for s in r["v2_test"]) / len(r["v2_test"])) if len(r["v2_test"]) > 0 else 0.0
+        
+        test_app_data.append({
+            "Symbol": sym,
+            "Market_Cap_Bln": r["features"]["Market_Cap_Bln"],
+            "Log_Size": math.log(r["features"]["Market_Cap_Bln"]),
+            "Turnover_Pct": r["features"]["Turnover_Pct"],
+            "Volatility_Pct": r["features"]["Volatility_Pct"],
+            "Core_Fraction_Pct": r["features"]["Core_Fraction_Pct"],
+            "V1_Bounce": v1_te_br,
+            "V2_Bounce": v2_te_br,
+            "VP_Bounce": vp_te_br,
+            "V1_Premium": v1_te_br - vp_te_br,
+            "V2_Premium": v2_te_br - vp_te_br,
+            "V1_vs_V2_Premium": v1_te_br - v2_te_br
         })
         
         for k in model_keys:
@@ -549,14 +608,12 @@ def print_quant_ab_test_report(results_list: list):
             mfe[k].extend([s["mfe"] for s in r[k]])
             signals[k].extend(r[k])
             
+        # Fix index mismatch bug (indexing ct[1], ct[2], ct[3] instead of ct[0], ct[1], ct[2])
         for ct in r["co_touches"]:
-            all_vp_co_success.append(ct[0])
-            all_v1_co_success.append(ct[1])
-            all_v2_co_success.append(ct[2])
+            all_vp_co_success.append(ct[1])
+            all_v1_co_success.append(ct[2])
+            all_v2_co_success.append(ct[3])
             
-    # Calculate portfolio metrics
-    port_metrics = {k: calculate_portfolio_metrics(signals[k]) for k in model_keys}
-    
     # Print Table 1
     print(f"{'模型特徵':<38} | {'總觸碰數':<8} | {'5日反彈率':<9} | {'5日均回報':<9} | {'20日均回報':<10} | {'5日均 MAE':<9} | {'5日均 MFE':<9}")
     print("-"*115)
@@ -569,15 +626,18 @@ def print_quant_ab_test_report(results_list: list):
         print(f"{model_names[k]:<38} | {touches[k]:<8} | {br:.2f}% | {r5:+.2f}%   | {r20:+.2f}%    | {ae:.2f}%   | {fe:.2f}%")
     print("="*115)
     
-    # Print Table 2
+    # Print Table 2 with Friction Scenarios
     print("\n" + "="*115)
-    print("【交易策略模擬績效對比 (-3% 止損 / +8% 止盈)】")
+    print("【交易策略模擬績效與交易摩擦敏感度對比 (-3% 止損 / +8% 止盈)】")
     print("="*115)
-    print(f"{'模型':<35} | {'年化收益':<8} | {'年化波動':<8} | {'夏普值 Sharpe':<13} | {'索提諾 Sortino':<14} | {'最大回撤 MDD':<12} | {'獲利因子 PF':<11}")
+    print(f"{'模型名稱':<35} | {'摩擦=0.0% (Sharpe/年化)':<22} | {'摩擦=0.414% (Sharpe/年化)':<22} | {'摩擦=0.60% (Sharpe/年化)':<22} | {'摩擦=0.90% (Sharpe/年化)':<22}")
     print("-"*115)
     for k in model_keys:
-        p = port_metrics[k]
-        print(f"{model_names[k]:<35} | {p['return']*100:+.2f}%   | {p['vol']*100:.2f}%   | {p['sharpe']:.2f}         | {p['sortino']:.2f}          | {p['mdd']*100:.2f}%       | {p['pf']:.2f}")
+        p_00 = calculate_portfolio_metrics(signals[k], friction_cost=0.0)
+        p_04 = calculate_portfolio_metrics(signals[k], friction_cost=0.00414)
+        p_06 = calculate_portfolio_metrics(signals[k], friction_cost=0.006)
+        p_09 = calculate_portfolio_metrics(signals[k], friction_cost=0.009)
+        print(f"{model_names[k]:<35} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_06['sharpe']:.2f} / {p_06['return']*100:+.2f}% | {p_09['sharpe']:.2f} / {p_09['return']*100:+.2f}%")
     print("="*115)
     
     # McNemar & Wilcoxon
@@ -589,9 +649,11 @@ def print_quant_ab_test_report(results_list: list):
         print(f"1. 共同觸發事件配對檢定 (McNemar's Test) - 共 {len(all_vp_co_success)} 個配對事件:")
         mc_v2_vs_vp = mcnemar_test(all_v2_co_success, all_vp_co_success)
         print(f"  * Cost Model v2 vs. Volume Profile Baseline: Chi-Square={mc_v2_vs_vp['chi2']:.4f}, p-value={mc_v2_vs_vp['p_value']:.4e} (是否顯著: {mc_v2_vs_vp['significant']})")
+        print(f"    - 配對矩陣: a(共同成功)={mc_v2_vs_vp['contingency_table']['a']}, b(v2成功/VP失敗)={mc_v2_vs_vp['contingency_table']['b']}, c(v2失敗/VP成功)={mc_v2_vs_vp['contingency_table']['c']}, d(共同失敗)={mc_v2_vs_vp['contingency_table']['d']}")
         
         mc_v2_vs_v1 = mcnemar_test(all_v2_co_success, all_v1_co_success)
         print(f"  * Cost Model v2 vs. Cost Model v1 (Single Pool): Chi-Square={mc_v2_vs_v1['chi2']:.4f}, p-value={mc_v2_vs_v1['p_value']:.4e} (是否顯著: {mc_v2_vs_v1['significant']})")
+        print(f"    - 配對矩陣: a(共同成功)={mc_v2_vs_v1['contingency_table']['a']}, b(v2成功/v1失敗)={mc_v2_vs_v1['contingency_table']['b']}, c(v2失敗/v1成功)={mc_v2_vs_v1['contingency_table']['c']}, d(共同失敗)={mc_v2_vs_v1['contingency_table']['d']}")
         
     if len(wilcoxon_stocks) >= 10:
         print(f"\n2. 個股反彈勝率配對符號等級檢定 (Wilcoxon Signed-Rank Test) - 共 {len(wilcoxon_stocks)} 檔股票:")
@@ -602,20 +664,21 @@ def print_quant_ab_test_report(results_list: list):
         print(f"  * Cost Model v1 vs. Cost Model v2 [消融研究]: W={wx_v1_vs_v2['w_statistic']:.1f}, p-value={wx_v1_vs_v2['p_value']:.4e} (是否顯著: {wx_v1_vs_v2['significant']})")
     print("="*115)
     
-    # 3. Cross-Sectional Applicability Analysis
-    df_app = pd.DataFrame(app_data)
+    # 3. Cross-Sectional Applicability Analysis (Train Period 2016-2022)
+    df_train_app = pd.DataFrame(train_app_data)
+    df_test_app = pd.DataFrame(test_app_data)
     
-    # OLS Regression
+    # OLS Regression on Train
     X_cols = ["Log_Size", "Turnover_Pct", "Volatility_Pct", "Core_Fraction_Pct"]
-    y_reg = df_app["V1_Premium"].values
-    reg_results = run_multiple_regression(df_app[X_cols], y_reg)
+    y_train = df_train_app["V1_Premium"].values
+    reg_results = run_multiple_regression(df_train_app[X_cols], y_train)
     
-    # Decision Tree Feature Importance
-    dt_results = compute_decision_tree_importance(df_app[X_cols], y_reg)
+    # Decision Tree Feature Importance on Train
+    dt_results = compute_decision_tree_importance(df_train_app[X_cols], y_train)
     
     print("\n" + "="*115)
-    print("【模型適用性橫截面回歸分析 (Cross-Sectional Regression)】")
-    print("目標變數 (y) = Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
+    print("【模型適用性橫截面回歸分析 - 訓練期 (Cross-Sectional Regression 2016-2022)】")
+    print("目標變數 (y) = 訓練期 Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
     print("="*115)
     print(f"{'自變數':<25} | {'係數 Beta':<12} | {'標準差 SE':<12} | {'t-Statistic':<12} | {'p-Value':<10} | {'顯著性'}")
     print("-"*115)
@@ -625,8 +688,8 @@ def print_quant_ab_test_report(results_list: list):
     print("="*115)
     
     print("\n" + "="*115)
-    print("【決策樹適用性特徵重要性 (Decision Tree Feature Importance)】")
-    print("目標變數 (y) = Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
+    print("【決策樹適用性特徵重要性 - 訓練期 (Decision Tree Feature Importance 2016-2022)】")
+    print("目標變數 (y) = 訓練期 Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
     print("="*115)
     print(f"根節點最佳分裂特徵 (Best Split Feature): {dt_results['best_split_feature']} (閾值 = {dt_results['best_split_threshold']:.4f})")
     print("-"*115)
@@ -634,27 +697,21 @@ def print_quant_ab_test_report(results_list: list):
         print(f"{f:<25} | 重要性比重 (Importance Weight): {imp:.2f}%")
     print("="*115)
     
-    # Group Split Analysis (Decision split style)
-    median_turnover = df_app["Turnover_Pct"].median()
-    median_core = df_app["Core_Fraction_Pct"].median()
+    # Out-of-sample temporal validation on Test Period (2023-2026) using optimal split threshold
+    best_feat = dt_results["best_split_feature"]
+    best_thresh = dt_results["best_split_threshold"]
     
-    low_to = df_app[df_app["Turnover_Pct"] <= median_turnover]
-    high_to = df_app[df_app["Turnover_Pct"] > median_turnover]
-    
-    low_core = df_app[df_app["Core_Fraction_Pct"] <= median_core]
-    high_core = df_app[df_app["Core_Fraction_Pct"] > median_core]
-    
-    print("\n" + "="*115)
-    print("【特徵中位數分組拆解 (Applicability Split Analysis)】")
-    print("="*115)
-    print(f"1. 換手率 (Turnover Pct) 分組 (中位數 = {median_turnover:.4f}%):")
-    print(f"  * 低換手率組 (N={len(low_to)}): Model v1 勝率={low_to['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={low_to['V2_Bounce'].mean()*100:.2f}%, Baseline 勝率={low_to['VP_Bounce'].mean()*100:.2f}% (v1超額={low_to['V1_Premium'].mean()*100:+.2f}%)")
-    print(f"  * 高換手率組 (N={len(high_to)}): Model v1 勝率={high_to['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={high_to['V2_Bounce'].mean()*100:.2f}%, Baseline 勝率={high_to['VP_Bounce'].mean()*100:.2f}% (v1超額={high_to['V1_Premium'].mean()*100:+.2f}%)")
-    
-    print(f"\n2. 大戶集保比例 (Core Fraction) 分組 (中位數 = {median_core:.2f}%):")
-    print(f"  * 低大戶比例組 (N={len(low_core)}): Model v1 勝率={low_core['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={low_core['V2_Bounce'].mean()*100:.2f}% (v1-v2 溢價={low_core['V1_vs_V2_Premium'].mean()*100:+.2f}%)")
-    print(f"  * 高大戶比例組 (N={len(high_core)}): Model v1 勝率={high_core['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={high_core['V2_Bounce'].mean()*100:.2f}% (v1-v2 溢價={high_core['V1_vs_V2_Premium'].mean()*100:+.2f}%)")
-    print("="*115 + "\n")
+    if best_feat is not None and best_thresh is not None:
+        low_group = df_test_app[df_test_app[best_feat] <= best_thresh]
+        high_group = df_test_app[df_test_app[best_feat] > best_thresh]
+        
+        print("\n" + "="*115)
+        print(f"【適用性門檻樣本外時間驗證 (Out-of-Sample Temporal Validation 2023-2026)】")
+        print(f"依據訓練期選出之門檻：{best_feat} = {best_thresh:.4f}")
+        print("="*115)
+        print(f"  * 樣本外低值組 (N={len(low_group)}): Model v1 勝率={low_group['V1_Bounce'].mean()*100:.2f}%, Baseline 勝率={low_group['VP_Bounce'].mean()*100:.2f}% (超額勝率={low_group['V1_Premium'].mean()*100:+.2f}%)")
+        print(f"  * 樣本外高值組 (N={len(high_group)}): Model v1 勝率={high_group['V1_Bounce'].mean()*100:.2f}%, Baseline 勝率={high_group['VP_Bounce'].mean()*100:.2f}% (超額勝率={high_group['V1_Premium'].mean()*100:+.2f}%)")
+        print("="*115 + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
