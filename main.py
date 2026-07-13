@@ -99,7 +99,8 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
     history_records = simulator.run_daily_simulation(
         df_prices=df_prices,
         shares_outstanding=shares_outstanding,
-        corporate_actions=simulation_actions
+        corporate_actions=simulation_actions,
+        stock_code=symbol
     )
     click.echo("模擬完成！")
 

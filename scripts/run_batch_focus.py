@@ -74,7 +74,7 @@ def main():
             
             # 2. Run simulation
             simulator = CostSimulator(bin_size=5.0)
-            history_records = simulator.run_daily_simulation(df_prices, shares_outstanding, [])
+            history_records = simulator.run_daily_simulation(df_prices, shares_outstanding, [], stock_code=symbol)
             
             # 3. Calculate metrics
             final_dist = simulator.distribution
