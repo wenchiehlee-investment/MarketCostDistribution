@@ -253,6 +253,56 @@ def run_multiple_regression(X_df: pd.DataFrame, y: np.ndarray) -> dict:
         }
     return results
 
+def compute_decision_tree_importance(X_df: pd.DataFrame, y: np.ndarray) -> dict:
+    """Computes Gini / Variance reduction feature importances using a 1-depth split search."""
+    features = list(X_df.columns)
+    X = X_df.values
+    N, k = X.shape
+    global_mean = np.mean(y)
+    global_sse = np.sum((y - global_mean)**2)
+    
+    best_feat = None
+    best_thresh = None
+    best_reduction = 0.0
+    
+    feat_max_reduction = {}
+    for fi in range(k):
+        feat_vals = X[:, fi]
+        # Use deciles as splits
+        thresholds = np.percentile(feat_vals, range(10, 95, 10))
+        max_red = 0.0
+        best_t_for_feat = None
+        for t in thresholds:
+            left_mask = feat_vals <= t
+            right_mask = ~left_mask
+            if np.sum(left_mask) < 5 or np.sum(right_mask) < 5:
+                continue
+            y_l = y[left_mask]
+            y_r = y[right_mask]
+            sse_l = np.sum((y_l - np.mean(y_l))**2)
+            sse_r = np.sum((y_r - np.mean(y_r))**2)
+            red = global_sse - (sse_l + sse_r)
+            if red > max_red:
+                max_red = red
+                best_t_for_feat = t
+        feat_max_reduction[features[fi]] = max_red
+        if max_red > best_reduction:
+            best_reduction = max_red
+            best_feat = features[fi]
+            best_thresh = best_t_for_feat
+            
+    total_red = sum(feat_max_reduction.values())
+    importances = {}
+    for f in features:
+        importances[f] = (feat_max_reduction[f] / total_red * 100.0) if total_red > 0 else 25.0
+        
+    return {
+        "best_split_feature": best_feat,
+        "best_split_threshold": best_thresh,
+        "importances": importances
+    }
+
+
 def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     loader = DataLoader()
     try:
@@ -560,6 +610,9 @@ def print_quant_ab_test_report(results_list: list):
     y_reg = df_app["V1_Premium"].values
     reg_results = run_multiple_regression(df_app[X_cols], y_reg)
     
+    # Decision Tree Feature Importance
+    dt_results = compute_decision_tree_importance(df_app[X_cols], y_reg)
+    
     print("\n" + "="*115)
     print("【模型適用性橫截面回歸分析 (Cross-Sectional Regression)】")
     print("目標變數 (y) = Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
@@ -569,6 +622,16 @@ def print_quant_ab_test_report(results_list: list):
     for k, v in reg_results.items():
         print(f"{k:<25} | {v['coefficient']:+.6f} | {v['std_error']:.6f} | {v['t_stat']:+.4f} | {v['p_value']:.4e} | {v['sig']}")
     print("註：* p<0.10, ** p<0.05, *** p<0.01")
+    print("="*115)
+    
+    print("\n" + "="*115)
+    print("【決策樹適用性特徵重要性 (Decision Tree Feature Importance)】")
+    print("目標變數 (y) = Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
+    print("="*115)
+    print(f"根節點最佳分裂特徵 (Best Split Feature): {dt_results['best_split_feature']} (閾值 = {dt_results['best_split_threshold']:.4f})")
+    print("-"*115)
+    for f, imp in dt_results["importances"].items():
+        print(f"{f:<25} | 重要性比重 (Importance Weight): {imp:.2f}%")
     print("="*115)
     
     # Group Split Analysis (Decision split style)
