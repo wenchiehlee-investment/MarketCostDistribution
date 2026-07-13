@@ -233,13 +233,26 @@ def print_summary(results_list: list):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="2330,2454,2382,8299,2308", help="Comma separated stock symbols")
+    parser.add_argument("--symbols", type=str, default="2330,2454,2382,8299,2308", help="Comma separated stock symbols or 'all'")
     args = parser.parse_args()
     
-    symbols_list = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if args.symbols.strip().lower() == "all":
+        repo_root = Path(__file__).resolve().parent.parent
+        focus_csv = repo_root / "data" / "StockID_TWSE_TPEX_focus.csv"
+        if not focus_csv.exists():
+            print(f"Error: Focus list CSV not found at {focus_csv}")
+            sys.exit(1)
+        df_focus = pd.read_csv(focus_csv, dtype={"代號": str})
+        symbols_list = df_focus["代號"].str.strip().tolist()
+    else:
+        symbols_list = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        
     results = []
     for sym in symbols_list:
-        print(f"Running backtest for {sym}...")
-        results.append(backtest_stock(sym))
+        try:
+            print(f"Running backtest for {sym}...")
+            results.append(backtest_stock(sym))
+        except Exception as e:
+            print(f"Error running backtest for {sym}: {e}")
         
     print_summary(results)
