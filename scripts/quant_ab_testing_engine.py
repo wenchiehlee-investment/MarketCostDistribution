@@ -150,15 +150,15 @@ def wilcoxon_test(x: list, y: list) -> dict:
 
 def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0) -> dict:
     """
-    Constructs a daily portfolio equity curve and calculates standard quant metrics.
-    trade_signals: list of dicts: {"trade_dates": list of dates, "daily_returns": list of daily returns}
+    Constructs a daily portfolio equity curve and calculates standard quant metrics,
+    including the actual annualized single-sided weight-based turnover.
     """
     if not trade_signals:
-        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0}
+        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0}
         
-    # Map dates to daily returns of active trades
     daily_active_trades = {}
-    for sig in trade_signals:
+    for idx, sig in enumerate(trade_signals):
+        trade_id = idx
         rets = list(sig.get("daily_returns", []))
         dates = list(sig.get("trade_dates", []))
         if rets and friction_cost > 0.0:
@@ -168,13 +168,44 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
         for d, ret in zip(dates, rets):
             if d not in daily_active_trades:
                 daily_active_trades[d] = []
-            daily_active_trades[d].append(ret)
+            daily_active_trades[d].append((trade_id, ret))
             
     if not daily_active_trades:
-        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0}
+        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0}
         
     sorted_dates = sorted(daily_active_trades.keys())
-    portfolio_daily_returns = np.array([np.mean(daily_active_trades[d]) for d in sorted_dates])
+    
+    daily_weights = {}
+    portfolio_daily_returns = []
+    
+    for d in sorted_dates:
+        trades = daily_active_trades[d]
+        N_t = len(trades)
+        daily_weights[d] = {}
+        if N_t > 0:
+            w_t = 1.0 / N_t
+            r_port = 0.0
+            for trade_id, ret in trades:
+                daily_weights[d][trade_id] = w_t
+                r_port += w_t * ret
+            portfolio_daily_returns.append(r_port)
+        else:
+            portfolio_daily_returns.append(0.0)
+            
+    portfolio_daily_returns = np.array(portfolio_daily_returns)
+    
+    # Calculate daily target weight changes (Turnover)
+    daily_turnovers = []
+    for idx, d in enumerate(sorted_dates):
+        w_curr = daily_weights[d]
+        w_prev = daily_weights[sorted_dates[idx-1]] if idx > 0 else {}
+        
+        all_ids = set(w_curr.keys()) | set(w_prev.keys())
+        t_turn = 0.5 * sum(abs(w_curr.get(tid, 0.0) - w_prev.get(tid, 0.0)) for tid in all_ids)
+        daily_turnovers.append(t_turn)
+        
+    total_years = len(sorted_dates) / 252.0 if len(sorted_dates) > 0 else 1.0
+    annualized_turnover = sum(daily_turnovers) / total_years if total_years > 0 else 0.0
     
     # Calculate metrics
     mean_ret = np.mean(portfolio_daily_returns)
@@ -194,7 +225,6 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
     drawdowns = (equity - peaks) / peaks
     mdd = np.min(drawdowns) if len(drawdowns) > 0 else 0.0
     
-    # Profit Factor
     gross_profits = np.sum(portfolio_daily_returns[portfolio_daily_returns > 0])
     gross_losses = np.sum(np.abs(portfolio_daily_returns[portfolio_daily_returns < 0]))
     pf = (gross_profits / gross_losses) if gross_losses > 0 else 1.0
@@ -205,7 +235,8 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
         "sharpe": sharpe,
         "sortino": sortino,
         "mdd": mdd,
-        "pf": pf
+        "pf": pf,
+        "turnover": annualized_turnover
     }
 
 def run_multiple_regression(X_df: pd.DataFrame, y: np.ndarray) -> dict:
@@ -319,13 +350,11 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         
     bin_size = 1.0 if symbol in ["2330", "2454", "3034"] else 0.5
     
-    # Precompute SMA_200 and Rolling_VWAP
     df_prices["SMA_200"] = df_prices["Close"].rolling(200).mean()
     rolling_vol = df_prices["Volume"].rolling(20).sum()
     rolling_pv = (df_prices["Close"] * df_prices["Volume"]).rolling(20).sum()
     df_prices["Rolling_VWAP"] = np.where(rolling_vol > 0, rolling_pv / rolling_vol, df_prices["Close"])
     
-    # 1. Run Baseline (Volume Profile)
     vp = VolumeProfile(bin_size=bin_size)
     vp_history = []
     for idx, row in df_prices.iterrows():
@@ -334,15 +363,12 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         vp.add_volume(l, h, vwap, row["Volume"])
         vp_history.append(dict(vp.distribution))
         
-    # 2. Run Cost Model v1 (Single Pool)
     cost_v1 = CostSimulator(bin_size=bin_size, model_type="single_pool")
     v1_history = cost_v1.run_daily_simulation(df_prices, shares_outstanding, [], stock_code=symbol)
     
-    # 3. Run Cost Model v2 (Double Pool + Concentration)
     cost_v2 = CostSimulator(bin_size=bin_size, model_type="double_pool_dynamic")
     v2_history = cost_v2.run_daily_simulation(df_prices, shares_outstanding, [], shareholder_concentration=shareholder_concentration, stock_code=symbol)
     
-    # Signals containers
     vp_signals = []
     v1_signals = []
     v2_signals = []
@@ -358,7 +384,6 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         low, high = current_row["Low"], current_row["High"]
         date_t = current_row["Date"]
         
-        # Check support touches
         vp_peaks = find_peaks(vp_history[idx - 1], bin_size, top_n=3)
         v1_peaks = find_peaks(v1_history[idx - 1]["Distribution"], bin_size, top_n=3)
         v2_peaks = find_peaks(v2_history[idx - 1]["Distribution"], bin_size, top_n=3)
@@ -384,19 +409,26 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
             exit_date = df_prices.iloc[idx+5]["Date"]
             p_prev = entry_price
             
+            is_ambiguous = 0
+            stopped_out = False
+            
             for k in range(1, 6):
                 row_k = df_prices.iloc[idx + k]
                 low_k, high_k, close_k = row_k["Low"], row_k["High"], row_k["Close"]
                 date_k = row_k["Date"]
                 
-                if low_k <= stop_price:
-                    # Stopped out
+                stop_breached = (low_k <= stop_price)
+                target_breached = (high_k >= peak * 1.02)
+                if stop_breached and target_breached:
+                    is_ambiguous = 1
+                
+                if stop_breached:
                     daily_returns.append((stop_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
+                    stopped_out = True
                     break
                 elif high_k >= target_price:
-                    # Target met
                     daily_returns.append((target_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
@@ -406,16 +438,24 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                     trade_dates.append(date_k)
                     p_prev = close_k
                     
-            # Correct MFE and MAE relative to Entry Price (Open[t+1])
+            # First-passage success definition: reached peak*1.02 before hitting stop price
+            success = 0
+            for k in range(1, 6):
+                row_k = df_prices.iloc[idx + k]
+                low_k, high_k = row_k["Low"], row_k["High"]
+                if low_k <= stop_price:
+                    success = 0
+                    break
+                elif high_k >= peak * 1.02:
+                    success = 1
+                    break
+                    
             lows_5d = df_prices.iloc[idx+1:idx+6]["Low"].values
             highs_5d = df_prices.iloc[idx+1:idx+6]["High"].values
-            closes_5d = df_prices.iloc[idx+1:idx+6]["Close"].values
             
-            success = int(len(closes_5d) > 0 and max(closes_5d) >= peak * 1.02)
             ret_5d = (df_prices.iloc[idx+5]["Close"] - entry_price) / entry_price
             ret_20d = (df_prices.iloc[idx+20]["Close"] - entry_price) / entry_price
             
-            # Floor MAE at 0 (or strictly non-positive) and ceiling MFE at 0 (strictly non-negative)
             mae = min(0.0, min((lows_5d - entry_price) / entry_price)) if len(lows_5d) > 0 else 0.0
             mfe = max(0.0, max((highs_5d - entry_price) / entry_price)) if len(highs_5d) > 0 else 0.0
             
@@ -428,7 +468,8 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                 "ret_5d": ret_5d,
                 "ret_20d": ret_20d,
                 "mae": mae,
-                "mfe": mfe
+                "mfe": mfe,
+                "is_ambiguous": is_ambiguous
             }
             
         vp_meta = None
@@ -457,14 +498,12 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         if vp_touch and v1_touch and v2_touch and vp_meta and v1_meta and v2_meta:
             co_touch_records.append((date_t, vp_meta["success"], v1_meta["success"], v2_meta["success"]))
             
-    # Calculate stock features for applicability analysis
     avg_price = df_prices["Close"].mean()
     mcap_bln = (shares_outstanding * avg_price / 1e9) if shares_outstanding > 0 else 1.0
     avg_turnover_pct = (df_prices["Volume"] / shares_outstanding * 100).mean() if shares_outstanding > 0 else 0.0
     volatility_pct = (df_prices["Close"].pct_change().std() * 100)
     avg_core_pct = (shareholder_concentration["Core_Fraction"].mean() * 100) if shareholder_concentration is not None and not shareholder_concentration.empty else 60.0
     
-    # Split trade signals based on date
     train_limit = pd.Timestamp("2022-12-31")
     
     vp_train = [s for s in vp_signals if s["entry_date"] <= train_limit]
@@ -488,21 +527,18 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     return {
         "symbol": symbol,
         "prices": df_prices,
-        # Train signals
         "vp_train": vp_train,
         "v1_train": v1_train,
         "v2_train": v2_train,
         "sma200_train": sma_train,
         "vwap20_train": vwap_train,
         "co_touches_train": co_train,
-        # Test signals
         "vp_test": vp_test,
         "v1_test": v1_test,
         "v2_test": v2_test,
         "sma200_test": sma_test,
         "vwap20_test": vwap_test,
         "co_touches_test": co_test,
-        # Full signals
         "vp": vp_signals,
         "v1": v1_signals,
         "v2": v2_signals,
@@ -549,6 +585,15 @@ def print_quant_ab_test_report(results_list: list):
     train_app_data = []
     test_app_data = []
     
+    # Event decomposition
+    v1_only_signals = []
+    v2_only_signals = []
+    both_signals_v1 = []
+    both_signals_v2 = []
+    
+    total_signals_count = 0
+    ambiguous_signals_count = 0
+    
     for r in results_list:
         if r is None: continue
         sym = r["symbol"]
@@ -559,6 +604,28 @@ def print_quant_ab_test_report(results_list: list):
             for k in model_keys:
                 bounce_rates_by_stock[k].append(sum(s["success"] for s in r[k]) / len(r[k]))
                 
+        # Signal decomposition
+        v1_dates = {s["entry_date"]: s for s in r["v1"]}
+        v2_dates = {s["entry_date"]: s for s in r["v2"]}
+        both_dts = set(v1_dates.keys()) & set(v2_dates.keys())
+        v1_only_dts = set(v1_dates.keys()) - set(v2_dates.keys())
+        v2_only_dts = set(v2_dates.keys()) - set(v1_dates.keys())
+        
+        for d in both_dts:
+            both_signals_v1.append(v1_dates[d])
+            both_signals_v2.append(v2_dates[d])
+        for d in v1_only_dts:
+            v1_only_signals.append(v1_dates[d])
+        for d in v2_only_dts:
+            v2_only_signals.append(v2_dates[d])
+            
+        # Ambiguity ratio tracking
+        for k in model_keys:
+            for s in r[k]:
+                total_signals_count += 1
+                if s.get("is_ambiguous", 0) == 1:
+                    ambiguous_signals_count += 1
+                    
         # 1. Train applicability data (2016-2022)
         v1_tr_br = (sum(s["success"] for s in r["v1_train"]) / len(r["v1_train"])) if len(r["v1_train"]) > 0 else 0.0
         vp_tr_br = (sum(s["success"] for s in r["vp_train"]) / len(r["vp_train"])) if len(r["vp_train"]) > 0 else 0.0
@@ -608,7 +675,6 @@ def print_quant_ab_test_report(results_list: list):
             mfe[k].extend([s["mfe"] for s in r[k]])
             signals[k].extend(r[k])
             
-        # Fix index mismatch bug (indexing ct[1], ct[2], ct[3] instead of ct[0], ct[1], ct[2])
         for ct in r["co_touches"]:
             all_vp_co_success.append(ct[1])
             all_v1_co_success.append(ct[2])
@@ -626,19 +692,49 @@ def print_quant_ab_test_report(results_list: list):
         print(f"{model_names[k]:<38} | {touches[k]:<8} | {br:.2f}% | {r5:+.2f}%   | {r20:+.2f}%    | {ae:.2f}%   | {fe:.2f}%")
     print("="*115)
     
-    # Print Table 2 with Friction Scenarios
+    # Print Table 2 with Friction Scenarios and Weight-based Turnover
     print("\n" + "="*115)
     print("【交易策略模擬績效與交易摩擦敏感度對比 (-3% 止損 / +8% 止盈)】")
     print("="*115)
-    print(f"{'模型名稱':<35} | {'摩擦=0.0% (Sharpe/年化)':<22} | {'摩擦=0.414% (Sharpe/年化)':<22} | {'摩擦=0.60% (Sharpe/年化)':<22} | {'摩擦=0.90% (Sharpe/年化)':<22}")
+    print(f"{'模型名稱':<35} | {'摩擦=0.0% (Sharpe/年化)':<22} | {'摩擦=0.414% (Sharpe/年化)':<22} | {'摩擦=0.60% (Sharpe/年化)':<22} | {'摩擦=0.90% (Sharpe/年化)':<22} | {'年化周轉率'}")
     print("-"*115)
     for k in model_keys:
         p_00 = calculate_portfolio_metrics(signals[k], friction_cost=0.0)
         p_04 = calculate_portfolio_metrics(signals[k], friction_cost=0.00414)
         p_06 = calculate_portfolio_metrics(signals[k], friction_cost=0.006)
         p_09 = calculate_portfolio_metrics(signals[k], friction_cost=0.009)
-        print(f"{model_names[k]:<35} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_06['sharpe']:.2f} / {p_06['return']*100:+.2f}% | {p_09['sharpe']:.2f} / {p_09['return']*100:+.2f}%")
+        print(f"{model_names[k]:<35} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_06['sharpe']:.2f} / {p_06['return']*100:+.2f}% | {p_09['sharpe']:.2f} / {p_09['return']*100:+.2f}% | {p_04['turnover']:.1f}x")
     print("="*115)
+    
+    # Print Table 3: V1 vs V2 Signal Partition Analysis
+    print("\n" + "="*115)
+    print("【Cost Model v1 vs. v2 信號集合拆解分析 (V1-only, V2-only, Common)】")
+    print("="*115)
+    print(f"{'事件分組':<25} | {'事件數 (N)':<10} | {'5日反彈率 (%)':<14} | {'5日均回報 (%)':<14} | {'5日均 MAE':<10} | {'5日均 MFE':<10} | {'摩擦0.414%回報'}")
+    print("-"*115)
+    
+    partitions = {
+        "V1-only Signals": v1_only_signals,
+        "V2-only Signals": v2_only_signals,
+        "Both (V1 Side)": both_signals_v1,
+        "Both (V2 Side)": both_signals_v2
+    }
+    for name, sigs in partitions.items():
+        cnt = len(sigs)
+        if cnt > 0:
+            br_p = sum(s["success"] for s in sigs) / cnt * 100
+            r5_p = np.mean([s["ret_5d"] for s in sigs]) * 100
+            mae_p = np.mean([s["mae"] for s in sigs]) * 100
+            mfe_p = np.mean([s["mfe"] for s in sigs]) * 100
+            net_p = r5_p - 0.414
+        else:
+            br_p = r5_p = mae_p = mfe_p = net_p = 0.0
+        print(f"{name:<25} | {cnt:<10} | {br_p:.2f}%        | {r5_p:+.2f}%        | {mae_p:.2f}%    | {mfe_p:.2f}%    | {net_p:+.2f}%")
+    print("="*115)
+    
+    # Print Ambiguity metrics
+    ambiguity_ratio = (ambiguous_signals_count / total_signals_count * 100) if total_signals_count > 0 else 0.0
+    print(f"\n* 交易路徑同日雙觸發 (Stop & Target同日觸及) 歧義事件數: {ambiguous_signals_count} / {total_signals_count} ({ambiguity_ratio:.2f}%)")
     
     # McNemar & Wilcoxon
     print("\n" + "="*115)
