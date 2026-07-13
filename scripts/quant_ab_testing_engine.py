@@ -391,9 +391,11 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         ma_val = df_prices.iloc[idx - 1]["SMA_200"]
         vwap_val = df_prices.iloc[idx - 1]["Rolling_VWAP"]
         
-        vp_touch = any(prev_close >= p and low <= p <= high for p in vp_peaks)
-        v1_touch = any(prev_close >= p and low <= p <= high for p in v1_peaks)
-        v2_touch = any(prev_close >= p and low <= p <= high for p in v2_peaks)
+        # Check touch of peaks
+        # For stock-date level uniqueness, we only select the first touched peak on this day
+        vp_touch_peak = next((p for p in vp_peaks if prev_close >= p and low <= p <= high), None)
+        v1_touch_peak = next((p for p in v1_peaks if prev_close >= p and low <= p <= high), None)
+        v2_touch_peak = next((p for p in v2_peaks if prev_close >= p and low <= p <= high), None)
         
         sma_touch = (pd.notna(ma_val) and prev_close >= ma_val and low <= ma_val <= high)
         vwap_touch = (pd.notna(vwap_val) and prev_close >= vwap_val and low <= vwap_val <= high)
@@ -508,17 +510,14 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         v1_meta = None
         v2_meta = None
         
-        if vp_touch:
-            peak = next(p for p in vp_peaks if prev_close >= p and low <= p <= high)
-            vp_meta = get_trade_metrics(peak, date_t, idx)
+        if vp_touch_peak is not None:
+            vp_meta = get_trade_metrics(vp_touch_peak, date_t, idx)
             if vp_meta: vp_signals.append(vp_meta)
-        if v1_touch:
-            peak = next(p for p in v1_peaks if prev_close >= p and low <= p <= high)
-            v1_meta = get_trade_metrics(peak, date_t, idx)
+        if v1_touch_peak is not None:
+            v1_meta = get_trade_metrics(v1_touch_peak, date_t, idx)
             if v1_meta: v1_signals.append(v1_meta)
-        if v2_touch:
-            peak = next(p for p in v2_peaks if prev_close >= p and low <= p <= high)
-            v2_meta = get_trade_metrics(peak, date_t, idx)
+        if v2_touch_peak is not None:
+            v2_meta = get_trade_metrics(v2_touch_peak, date_t, idx)
             if v2_meta: v2_signals.append(v2_meta)
         if sma_touch:
             sma_meta = get_trade_metrics(ma_val, date_t, idx)
@@ -527,7 +526,7 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
             vwap_meta = get_trade_metrics(vwap_val, date_t, idx)
             if vwap_meta: vwap_signals.append(vwap_meta)
             
-        if vp_touch and v1_touch and v2_touch and vp_meta and v1_meta and v2_meta:
+        if vp_touch_peak is not None and v1_touch_peak is not None and v2_touch_peak is not None and vp_meta and v1_meta and v2_meta:
             co_touch_records.append((date_t, vp_meta["success"], v1_meta["success"], v2_meta["success"]))
             
     avg_price = df_prices["Close"].mean()
@@ -636,6 +635,12 @@ def print_quant_ab_test_report(results_list: list):
     
     amb_count = {k: 0 for k in model_keys}
     
+    # Unique keys tracker
+    v1_both_keys = []
+    v2_both_keys = []
+    v1_dup_count = 0
+    v2_dup_count = 0
+    
     for r in results_list:
         if r is None: continue
         sym = r["symbol"]
@@ -646,18 +651,28 @@ def print_quant_ab_test_report(results_list: list):
             for k in model_keys:
                 bounce_rates_by_stock[k].append(sum(s["success"] for s in r[k]) / len(r[k]))
                 
-        # Correct set-membership partition logic to handle multiple same-day signal duplicates
         common_dates = {ct[0] for ct in r["co_touches"]}
         
+        # Check duplicates in V1 stock-date
+        v1_dates = [s["touch_date"] for s in r["v1"]]
+        if len(v1_dates) != len(set(v1_dates)):
+            v1_dup_count += (len(v1_dates) - len(set(v1_dates)))
+            
+        v2_dates = [s["touch_date"] for s in r["v2"]]
+        if len(v2_dates) != len(set(v2_dates)):
+            v2_dup_count += (len(v2_dates) - len(set(v2_dates)))
+            
         for s in r["v1"]:
             if s["touch_date"] in common_dates:
                 both_signals_v1.append(s)
+                v1_both_keys.append((sym, s["touch_date"]))
             else:
                 v1_only_signals.append(s)
                 
         for s in r["v2"]:
             if s["touch_date"] in common_dates:
                 both_signals_v2.append(s)
+                v2_both_keys.append((sym, s["touch_date"]))
             else:
                 v2_only_signals.append(s)
                 
@@ -805,6 +820,19 @@ def print_quant_ab_test_report(results_list: list):
         p20 = np.mean(pre_20d[k]) * 100 if pre_20d[k] else 0.0
         pdd = np.mean(pre_dd[k]) * 100 if pre_dd[k] else 0.0
         print(f"{model_names[k]:<38} | {p5:+.2f}%          | {p20:+.2f}%          | {pdd:+.2f}%")
+    print("="*115)
+    
+    # Print Invariant check
+    both_keys_unique = (len(v1_both_keys) == len(set(v1_both_keys))) and (len(v2_both_keys) == len(set(v2_both_keys)))
+    both_keys_match = (set(v1_both_keys) == set(v2_both_keys))
+    
+    print("\n" + "="*115)
+    print("【信號對帳與不變量檢查 (Signal Alignment & Invariant Checks)】")
+    print("="*115)
+    print(f"Both keys are unique (No duplicate stock-date inside Both): {both_keys_unique}")
+    print(f"V1 Both key set == V2 Both key set (Perfect stock-date matching): {both_keys_match}")
+    print(f"Duplicated (stock, touch_date) in V1: {v1_dup_count}")
+    print(f"Duplicated (stock, touch_date) in V2: {v2_dup_count}")
     print("="*115)
     
     # McNemar & Wilcoxon
