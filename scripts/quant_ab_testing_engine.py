@@ -204,6 +204,55 @@ def calculate_portfolio_metrics(trade_signals: list) -> dict:
         "pf": pf
     }
 
+def run_multiple_regression(X_df: pd.DataFrame, y: np.ndarray) -> dict:
+    """Runs multiple linear regression y = X * beta using numpy OLS."""
+    N = len(y)
+    X = np.column_stack([np.ones(N), X_df.values])
+    k = X.shape[1]
+    
+    beta, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+    
+    y_pred = X @ beta
+    resid = y - y_pred
+    rss = np.sum(resid**2)
+    df = N - k
+    s2 = rss / df if df > 0 else 0.0
+    
+    try:
+        xtx_inv = np.linalg.inv(X.T @ X)
+        cov_matrix = s2 * xtx_inv
+        se = np.sqrt(np.diag(cov_matrix))
+    except Exception:
+        se = np.zeros(k)
+        
+    t_stats = []
+    p_values = []
+    for i in range(k):
+        if se[i] > 0:
+            t = beta[i] / se[i]
+            p = 1.0 - math.erf(abs(t) / math.sqrt(2.0))
+        else:
+            t = 0.0
+            p = 1.0
+        t_stats.append(t)
+        p_values.append(p)
+        
+    feature_names = ["Intercept"] + list(X_df.columns)
+    results = {}
+    for name, b, s_err, t, p in zip(feature_names, beta, se, t_stats, p_values):
+        stars = ""
+        if p < 0.01: stars = "***"
+        elif p < 0.05: stars = "**"
+        elif p < 0.10: stars = "*"
+        results[name] = {
+            "coefficient": b,
+            "std_error": s_err,
+            "t_stat": t,
+            "p_value": p,
+            "sig": stars
+        }
+    return results
+
 def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     loader = DataLoader()
     try:
@@ -213,7 +262,16 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     except Exception:
         return None
         
+    if df_prices.empty or len(df_prices) < warmup_days + 30:
+        return None
+        
     bin_size = 1.0 if symbol in ["2330", "2454", "3034"] else 0.5
+    
+    # Precompute rolling SMA_200 and Rolling_VWAP
+    df_prices["SMA_200"] = df_prices["Close"].rolling(200).mean()
+    rolling_vol = df_prices["Volume"].rolling(20).sum()
+    rolling_pv = (df_prices["Close"] * df_prices["Volume"]).rolling(20).sum()
+    df_prices["Rolling_VWAP"] = np.where(rolling_vol > 0, rolling_pv / rolling_vol, df_prices["Close"])
     
     # 1. Run Baseline (Volume Profile)
     vp = VolumeProfile(bin_size=bin_size)
@@ -236,73 +294,73 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
     vp_signals = []
     v1_signals = []
     v2_signals = []
+    sma_signals = []
+    vwap_signals = []
     
-    # Keep track of co-touch events on day t for McNemar's test
-    co_touch_records = [] # elements: (date, vp_success, v1_success, v2_success)
-    
+    co_touch_records = []
     N = len(df_prices)
+    
     for idx in range(warmup_days, N - 20):
         current_row = df_prices.iloc[idx]
         prev_close = df_prices.iloc[idx - 1]["Close"]
         low, high = current_row["Low"], current_row["High"]
         date_t = current_row["Date"]
         
-        # Check touches
+        # Check support touches
         vp_peaks = find_peaks(vp_history[idx - 1], bin_size, top_n=3)
         v1_peaks = find_peaks(v1_history[idx - 1]["Distribution"], bin_size, top_n=3)
         v2_peaks = find_peaks(v2_history[idx - 1]["Distribution"], bin_size, top_n=3)
+        
+        ma_val = df_prices.iloc[idx - 1]["SMA_200"]
+        vwap_val = df_prices.iloc[idx - 1]["Rolling_VWAP"]
         
         vp_touch = any(prev_close >= p and low <= p <= high for p in vp_peaks)
         v1_touch = any(prev_close >= p and low <= p <= high for p in v1_peaks)
         v2_touch = any(prev_close >= p and low <= p <= high for p in v2_peaks)
         
-        # Helper to compute trading metrics for a touched peak
+        sma_touch = (pd.notna(ma_val) and prev_close >= ma_val and low <= ma_val <= high)
+        vwap_touch = (pd.notna(vwap_val) and prev_close >= vwap_val and low <= vwap_val <= high)
+        
         def get_trade_metrics(peak):
-            # Trading strategy: buy at t+1 Open
             entry_price = df_prices.iloc[idx+1]["Open"]
+            if entry_price <= 0: return None
             stop_price = entry_price * 0.97
             target_price = entry_price * 1.08
             
             daily_returns = []
             trade_dates = []
             exit_date = df_prices.iloc[idx+5]["Date"]
-            
             p_prev = entry_price
-            stopped = False
+            
             for k in range(1, 6):
                 row_k = df_prices.iloc[idx + k]
                 low_k, high_k, close_k = row_k["Low"], row_k["High"], row_k["Close"]
                 date_k = row_k["Date"]
                 
-                # Check stop-loss
                 if low_k <= stop_price:
                     daily_returns.append((stop_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
-                    stopped = True
                     break
-                # Check take-profit
                 elif high_k >= target_price:
                     daily_returns.append((target_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
-                    stopped = True
                     break
                 else:
                     daily_returns.append((close_k - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     p_prev = close_k
                     
-            # 5-day bounce defined as: max close price in next 5 days goes up >= 2% from peak
             closes_5d = df_prices.iloc[idx:idx+5]["Close"].values
             lows_5d = df_prices.iloc[idx:idx+5]["Low"].values
             highs_5d = df_prices.iloc[idx:idx+5]["High"].values
             
             success = int(len(closes_5d) > 0 and max(closes_5d) >= peak * 1.02)
-            ret_5d = (df_prices.iloc[idx+5]["Close"] - peak) / peak
-            ret_20d = (df_prices.iloc[idx+20]["Close"] - peak) / peak
-            mae = min((lows_5d - peak) / peak) if len(lows_5d) > 0 else 0.0
-            mfe = max((highs_5d - peak) / peak) if len(highs_5d) > 0 else 0.0
+            ret_5d = (df_prices.iloc[idx+5]["Close"] - peak) / peak if peak > 0 else 0.0
+            ret_20d = (df_prices.iloc[idx+20]["Close"] - peak) / peak if peak > 0 else 0.0
+            mae = min((lows_5d - peak) / peak) if (len(lows_5d) > 0 and peak > 0) else 0.0
+            mfe = max((highs_5d - peak) / peak) if (len(highs_5d) > 0 and peak > 0) else 0.0
             
             return {
                 "entry_date": df_prices.iloc[idx+1]["Date"],
@@ -323,167 +381,217 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         if vp_touch:
             peak = next(p for p in vp_peaks if prev_close >= p and low <= p <= high)
             vp_meta = get_trade_metrics(peak)
-            vp_signals.append(vp_meta)
+            if vp_meta: vp_signals.append(vp_meta)
         if v1_touch:
             peak = next(p for p in v1_peaks if prev_close >= p and low <= p <= high)
             v1_meta = get_trade_metrics(peak)
-            v1_signals.append(v1_meta)
+            if v1_meta: v1_signals.append(v1_meta)
         if v2_touch:
             peak = next(p for p in v2_peaks if prev_close >= p and low <= p <= high)
             v2_meta = get_trade_metrics(peak)
-            v2_signals.append(v2_meta)
+            if v2_meta: v2_signals.append(v2_meta)
+        if sma_touch:
+            sma_meta = get_trade_metrics(ma_val)
+            if sma_meta: sma_signals.append(sma_meta)
+        if vwap_touch:
+            vwap_meta = get_trade_metrics(vwap_val)
+            if vwap_meta: vwap_signals.append(vwap_meta)
             
-        # Co-touch recording (all three models triggered touch on day t)
-        if vp_touch and v1_touch and v2_touch:
+        if vp_touch and v1_touch and v2_touch and vp_meta and v1_meta and v2_meta:
             co_touch_records.append((date_t, vp_meta["success"], v1_meta["success"], v2_meta["success"]))
             
+    # Calculate stock features for applicability analysis
+    avg_price = df_prices["Close"].mean()
+    mcap_bln = (shares_outstanding * avg_price / 1e9) if shares_outstanding > 0 else 1.0
+    avg_turnover_pct = (df_prices["Volume"] / shares_outstanding * 100).mean() if shares_outstanding > 0 else 0.0
+    volatility_pct = (df_prices["Close"].pct_change().std() * 100)
+    avg_core_pct = (shareholder_concentration["Core_Fraction"].mean() * 100) if shareholder_concentration is not None and not shareholder_concentration.empty else 60.0
+    
     return {
         "symbol": symbol,
         "prices": df_prices,
         "vp": vp_signals,
         "v1": v1_signals,
         "v2": v2_signals,
-        "co_touches": co_touch_records
+        "sma200": sma_signals,
+        "vwap20": vwap_signals,
+        "co_touches": co_touch_records,
+        "features": {
+            "Market_Cap_Bln": mcap_bln,
+            "Turnover_Pct": avg_turnover_pct,
+            "Volatility_Pct": volatility_pct,
+            "Core_Fraction_Pct": avg_core_pct
+        }
     }
 
 def print_quant_ab_test_report(results_list: list):
-    print("\n" + "="*95)
-    print("【量化持股成本模型三方 A/B 測試與統計顯著性驗證報告】")
-    print("="*95)
+    print("\n" + "="*115)
+    print("【量化持股成本模型五方 A/B 測試與多基準模型驗證報告】")
+    print("="*115)
     
-    total_vp_touches = 0
-    total_vp_bounces = 0
-    total_v1_touches = 0
-    total_v1_bounces = 0
-    total_v2_touches = 0
-    total_v2_bounces = 0
+    model_keys = ["vp", "sma200", "vwap20", "v1", "v2"]
+    model_names = {
+        "vp": "1. Volume Profile (Baseline)",
+        "sma200": "2. SMA 200 (Baseline)",
+        "vwap20": "3. Rolling VWAP 20d (Baseline)",
+        "v1": "4. Cost Model v1 (Single Pool)",
+        "v2": "5. Cost Model v2 (Double Pool Dynamic)"
+    }
     
-    vp_ret_5 = []
-    vp_ret_20 = []
-    vp_mae = []
-    vp_mfe = []
+    touches = {k: 0 for k in model_keys}
+    bounces = {k: 0 for k in model_keys}
+    ret_5d = {k: [] for k in model_keys}
+    ret_20d = {k: [] for k in model_keys}
+    mae = {k: [] for k in model_keys}
+    mfe = {k: [] for k in model_keys}
+    signals = {k: [] for k in model_keys}
     
-    v1_ret_5 = []
-    v1_ret_20 = []
-    v1_mae = []
-    v1_mfe = []
-    
-    v2_ret_5 = []
-    v2_ret_20 = []
-    v2_mae = []
-    v2_mfe = []
-    
-    # For Wilcoxon signed-rank test on stock-level 5-day bounce rates
     wilcoxon_stocks = []
-    vp_bounce_rates = []
-    v1_bounce_rates = []
-    v2_bounce_rates = []
+    bounce_rates_by_stock = {k: [] for k in model_keys}
     
-    # Co-touches container for McNemar
     all_vp_co_success = []
     all_v1_co_success = []
     all_v2_co_success = []
     
-    all_vp_signals = []
-    all_v1_signals = []
-    all_v2_signals = []
+    first_res = next(r for r in results_list if r is not None)
+    date_index = first_res["prices"]["Date"]
+    
+    # Applicability dataset list
+    app_data = []
     
     for r in results_list:
-        if r is None:
-            continue
-        symbol = r["symbol"]
+        if r is None: continue
+        sym = r["symbol"]
         
-        vp_t = len(r["vp"])
-        v1_t = len(r["v1"])
-        v2_t = len(r["v2"])
+        has_all = all(len(r[k]) > 0 for k in model_keys)
+        if has_all:
+            wilcoxon_stocks.append(sym)
+            for k in model_keys:
+                bounce_rates_by_stock[k].append(sum(s["success"] for s in r[k]) / len(r[k]))
+                
+        # Collect stock metrics for regression
+        v1_br = (sum(s["success"] for s in r["v1"]) / len(r["v1"])) if len(r["v1"]) > 0 else 0.0
+        v2_br = (sum(s["success"] for s in r["v2"]) / len(r["v2"])) if len(r["v2"]) > 0 else 0.0
+        vp_br = (sum(s["success"] for s in r["vp"]) / len(r["vp"])) if len(r["vp"]) > 0 else 0.0
         
-        if vp_t > 0 and v1_t > 0 and v2_t > 0:
-            wilcoxon_stocks.append(symbol)
-            vp_bounce_rates.append(sum(s["success"] for s in r["vp"]) / vp_t)
-            v1_bounce_rates.append(sum(s["success"] for s in r["v1"]) / v1_t)
-            v2_bounce_rates.append(sum(s["success"] for s in r["v2"]) / v2_t)
+        app_data.append({
+            "Symbol": sym,
+            "Market_Cap_Bln": r["features"]["Market_Cap_Bln"],
+            "Log_Size": math.log(r["features"]["Market_Cap_Bln"]),
+            "Turnover_Pct": r["features"]["Turnover_Pct"],
+            "Volatility_Pct": r["features"]["Volatility_Pct"],
+            "Core_Fraction_Pct": r["features"]["Core_Fraction_Pct"],
+            "V1_Bounce": v1_br,
+            "V2_Bounce": v2_br,
+            "VP_Bounce": vp_br,
+            "V1_Premium": v1_br - vp_br,
+            "V2_Premium": v2_br - vp_br,
+            "V1_vs_V2_Premium": v1_br - v2_br,
+            "V1_Touches": len(r["v1"])
+        })
+        
+        for k in model_keys:
+            touches[k] += len(r[k])
+            bounces[k] += sum(s["success"] for s in r[k])
+            ret_5d[k].extend([s["ret_5d"] for s in r[k]])
+            ret_20d[k].extend([s["ret_20d"] for s in r[k]])
+            mae[k].extend([s["mae"] for s in r[k]])
+            mfe[k].extend([s["mfe"] for s in r[k]])
+            signals[k].extend(r[k])
             
-        total_vp_touches += vp_t
-        total_vp_bounces += sum(s["success"] for s in r["vp"])
-        vp_ret_5.extend([s["ret_5d"] for s in r["vp"]])
-        vp_ret_20.extend([s["ret_20d"] for s in r["vp"]])
-        vp_mae.extend([s["mae"] for s in r["vp"]])
-        vp_mfe.extend([s["mfe"] for s in r["vp"]])
-        all_vp_signals.extend(r["vp"])
-        
-        total_v1_touches += v1_t
-        total_v1_bounces += sum(s["success"] for s in r["v1"])
-        v1_ret_5.extend([s["ret_5d"] for s in r["v1"]])
-        v1_ret_20.extend([s["ret_20d"] for s in r["v1"]])
-        v1_mae.extend([s["mae"] for s in r["v1"]])
-        v1_mfe.extend([s["mfe"] for s in r["v1"]])
-        all_v1_signals.extend(r["v1"])
-        
-        total_v2_touches += v2_t
-        total_v2_bounces += sum(s["success"] for s in r["v2"])
-        v2_ret_5.extend([s["ret_5d"] for s in r["v2"]])
-        v2_ret_20.extend([s["ret_20d"] for s in r["v2"]])
-        v2_mae.extend([s["mae"] for s in r["v2"]])
-        v2_mfe.extend([s["mfe"] for s in r["v2"]])
-        all_v2_signals.extend(r["v2"])
-        
-        # Co-touches for McNemar
         for ct in r["co_touches"]:
-            all_vp_co_success.append(ct[1])
-            all_v1_co_success.append(ct[2])
-            all_v2_co_success.append(ct[3])
+            all_vp_co_success.append(ct[0])
+            all_v1_co_success.append(ct[1])
+            all_v2_co_success.append(ct[2])
             
-    # Portfolio curves
-    vp_port = calculate_portfolio_metrics(all_vp_signals)
-    v1_port = calculate_portfolio_metrics(all_v1_signals)
-    v2_port = calculate_portfolio_metrics(all_v2_signals)
+    # Calculate portfolio metrics
+    port_metrics = {k: calculate_portfolio_metrics(signals[k]) for k in model_keys}
     
-    # Output Table 1: Signal & Return Metrics
-    print(f"{'模型特徵':<32} | {'總觸碰數':<8} | {'5日反彈率':<9} | {'5日均回報':<9} | {'20日均回報':<10} | {'5日均 MAE':<9} | {'5日均 MFE':<9}")
-    print("-"*105)
-    print(f"{'1. Volume Profile (Baseline)':<32} | {total_vp_touches:<8} | {(total_vp_bounces/total_vp_touches*100):.2f}% | {np.mean(vp_ret_5)*100:+.2f}%   | {np.mean(vp_ret_20)*100:+.2f}%    | {np.mean(vp_mae)*100:.2f}%   | {np.mean(vp_mfe)*100:.2f}%")
-    print(f"{'2. Cost Model v1 (Single Pool)':<32} | {total_v1_touches:<8} | {(total_v1_bounces/total_v1_touches*100):.2f}% | {np.mean(v1_ret_5)*100:+.2f}%   | {np.mean(v1_ret_20)*100:+.2f}%    | {np.mean(v1_mae)*100:.2f}%   | {np.mean(v1_mfe)*100:.2f}%")
-    print(f"{'3. Cost Model v2 (Double+Concentr)':<32} | {total_v2_touches:<8} | {(total_v2_bounces/total_v2_touches*100):.2f}% | {np.mean(v2_ret_5)*100:+.2f}%   | {np.mean(v2_ret_20)*100:+.2f}%    | {np.mean(v2_mae)*100:.2f}%   | {np.mean(v2_mfe)*100:.2f}%")
-    print("="*105)
+    # Print Table 1
+    print(f"{'模型特徵':<38} | {'總觸碰數':<8} | {'5日反彈率':<9} | {'5日均回報':<9} | {'20日均回報':<10} | {'5日均 MAE':<9} | {'5日均 MFE':<9}")
+    print("-"*115)
+    for k in model_keys:
+        br = (bounces[k] / touches[k] * 100) if touches[k] > 0 else 0.0
+        r5 = np.mean(ret_5d[k]) * 100 if ret_5d[k] else 0.0
+        r20 = np.mean(ret_20d[k]) * 100 if ret_20d[k] else 0.0
+        ae = np.mean(mae[k]) * 100 if mae[k] else 0.0
+        fe = np.mean(mfe[k]) * 100 if mfe[k] else 0.0
+        print(f"{model_names[k]:<38} | {touches[k]:<8} | {br:.2f}% | {r5:+.2f}%   | {r20:+.2f}%    | {ae:.2f}%   | {fe:.2f}%")
+    print("="*115)
     
-    # Output Table 2: Trading Strategy Metrics (Sharpe, MDD)
-    print("\n" + "="*95)
+    # Print Table 2
+    print("\n" + "="*115)
     print("【交易策略模擬績效對比 (-3% 止損 / +8% 止盈)】")
-    print("="*95)
-    print(f"{'模型':<30} | {'年化收益':<8} | {'年化波動':<8} | {'夏普值 Sharpe':<13} | {'索提諾 Sortino':<14} | {'最大回撤 MDD':<12} | {'獲利因子 PF':<11}")
-    print("-"*95)
-    print(f"{'1. Volume Profile (Baseline)':<30} | {vp_port['return']*100:+.2f}%   | {vp_port['vol']*100:.2f}%   | {vp_port['sharpe']:.2f}         | {vp_port['sortino']:.2f}          | {vp_port['mdd']*100:.2f}%       | {vp_port['pf']:.2f}")
-    print(f"{'2. Cost Model v1 (Single Pool)':<30} | {v1_port['return']*100:+.2f}%   | {v1_port['vol']*100:.2f}%   | {v1_port['sharpe']:.2f}         | {v1_port['sortino']:.2f}          | {v1_port['mdd']*100:.2f}%       | {v1_port['pf']:.2f}")
-    print(f"{'3. Cost Model v2 (Double+Concentr)':<30} | {v2_port['return']*100:+.2f}%   | {v2_port['vol']*100:.2f}%   | {v2_port['sharpe']:.2f}         | {v2_port['sortino']:.2f}          | {v2_port['mdd']*100:.2f}%       | {v2_port['pf']:.2f}")
-    print("="*95)
+    print("="*115)
+    print(f"{'模型':<35} | {'年化收益':<8} | {'年化波動':<8} | {'夏普值 Sharpe':<13} | {'索提諾 Sortino':<14} | {'最大回撤 MDD':<12} | {'獲利因子 PF':<11}")
+    print("-"*115)
+    for k in model_keys:
+        p = port_metrics[k]
+        print(f"{model_names[k]:<35} | {p['return']*100:+.2f}%   | {p['vol']*100:.2f}%   | {p['sharpe']:.2f}         | {p['sortino']:.2f}          | {p['mdd']*100:.2f}%       | {p['pf']:.2f}")
+    print("="*115)
     
-    # Statistical Tests
-    print("\n" + "="*95)
+    # McNemar & Wilcoxon
+    print("\n" + "="*115)
     print("【統計顯著性檢定結果 (McNemar & Wilcoxon)】")
-    print("="*95)
+    print("="*115)
     
-    # 1. McNemar Test on Co-Touches
-    print(f"1. 共同觸發事件配對檢定 (McNemar's Test) - 共 {len(all_vp_co_success)} 個配對事件:")
-    mc_v2_vs_vp = mcnemar_test(all_v2_co_success, all_vp_co_success)
-    print(f"  * Cost Model v2 vs. Volume Profile Baseline:")
-    print(f"    - Contingency Table: {mc_v2_vs_vp['contingency_table']}")
-    print(f"    - Chi-Square: {mc_v2_vs_vp['chi2']:.4f}, p-value: {mc_v2_vs_vp['p_value']:.4e} (是否顯著: {mc_v2_vs_vp['significant']})")
+    if len(all_vp_co_success) > 0:
+        print(f"1. 共同觸發事件配對檢定 (McNemar's Test) - 共 {len(all_vp_co_success)} 個配對事件:")
+        mc_v2_vs_vp = mcnemar_test(all_v2_co_success, all_vp_co_success)
+        print(f"  * Cost Model v2 vs. Volume Profile Baseline: Chi-Square={mc_v2_vs_vp['chi2']:.4f}, p-value={mc_v2_vs_vp['p_value']:.4e} (是否顯著: {mc_v2_vs_vp['significant']})")
+        
+        mc_v2_vs_v1 = mcnemar_test(all_v2_co_success, all_v1_co_success)
+        print(f"  * Cost Model v2 vs. Cost Model v1 (Single Pool): Chi-Square={mc_v2_vs_v1['chi2']:.4f}, p-value={mc_v2_vs_v1['p_value']:.4e} (是否顯著: {mc_v2_vs_v1['significant']})")
+        
+    if len(wilcoxon_stocks) >= 10:
+        print(f"\n2. 個股反彈勝率配對符號等級檢定 (Wilcoxon Signed-Rank Test) - 共 {len(wilcoxon_stocks)} 檔股票:")
+        wx_v2_vs_vp = wilcoxon_test(bounce_rates_by_stock["v2"], bounce_rates_by_stock["vp"])
+        print(f"  * Cost Model v2 vs. Volume Profile Baseline: W={wx_v2_vs_vp['w_statistic']:.1f}, p-value={wx_v2_vs_vp['p_value']:.4e} (是否顯著: {wx_v2_vs_vp['significant']})")
+        
+        wx_v1_vs_v2 = wilcoxon_test(bounce_rates_by_stock["v1"], bounce_rates_by_stock["v2"])
+        print(f"  * Cost Model v1 vs. Cost Model v2 [消融研究]: W={wx_v1_vs_v2['w_statistic']:.1f}, p-value={wx_v1_vs_v2['p_value']:.4e} (是否顯著: {wx_v1_vs_v2['significant']})")
+    print("="*115)
     
-    mc_v2_vs_v1 = mcnemar_test(all_v2_co_success, all_v1_co_success)
-    print(f"  * Cost Model v2 vs. Cost Model v1 (Single Pool) [Ablation Study]:")
-    print(f"    - Contingency Table: {mc_v2_vs_v1['contingency_table']}")
-    print(f"    - Chi-Square: {mc_v2_vs_v1['chi2']:.4f}, p-value: {mc_v2_vs_v1['p_value']:.4e} (是否顯著: {mc_v2_vs_v1['significant']})")
+    # 3. Cross-Sectional Applicability Analysis
+    df_app = pd.DataFrame(app_data)
     
-    # 2. Wilcoxon Signed-Rank Test on Stock-level Bounce Rates
-    print(f"\n2. 個股反彈勝率配對符號等級檢定 (Wilcoxon Signed-Rank Test) - 共 {len(wilcoxon_stocks)} 檔股票:")
-    wx_v2_vs_vp = wilcoxon_test(v2_bounce_rates, vp_bounce_rates)
-    print(f"  * Cost Model v2 vs. Volume Profile Baseline:")
-    print(f"    - W-Statistic: {wx_v2_vs_vp['w_statistic']:.1f}, Z-Statistic: {wx_v2_vs_vp['z_statistic']:.4f}, p-value: {wx_v2_vs_vp['p_value']:.4e} (是否顯著: {wx_v2_vs_vp['significant']})")
+    # OLS Regression
+    X_cols = ["Log_Size", "Turnover_Pct", "Volatility_Pct", "Core_Fraction_Pct"]
+    y_reg = df_app["V1_Premium"].values
+    reg_results = run_multiple_regression(df_app[X_cols], y_reg)
     
-    wx_v2_vs_v1 = wilcoxon_test(v2_bounce_rates, v1_bounce_rates)
-    print(f"  * Cost Model v2 vs. Cost Model v1 (Single Pool) [Ablation Study]:")
-    print(f"    - W-Statistic: {wx_v2_vs_v1['w_statistic']:.1f}, Z-Statistic: {wx_v2_vs_v1['z_statistic']:.4f}, p-value: {wx_v2_vs_v1['p_value']:.4e} (是否顯著: {wx_v2_vs_v1['significant']})")
-    print("="*95 + "\n")
+    print("\n" + "="*115)
+    print("【模型適用性橫截面回歸分析 (Cross-Sectional Regression)】")
+    print("目標變數 (y) = Model v1 超額反彈率 (V1_Bounce_Rate - VP_Bounce_Rate)")
+    print("="*115)
+    print(f"{'自變數':<25} | {'係數 Beta':<12} | {'標準差 SE':<12} | {'t-Statistic':<12} | {'p-Value':<10} | {'顯著性'}")
+    print("-"*115)
+    for k, v in reg_results.items():
+        print(f"{k:<25} | {v['coefficient']:+.6f} | {v['std_error']:.6f} | {v['t_stat']:+.4f} | {v['p_value']:.4e} | {v['sig']}")
+    print("註：* p<0.10, ** p<0.05, *** p<0.01")
+    print("="*115)
+    
+    # Group Split Analysis (Decision split style)
+    median_turnover = df_app["Turnover_Pct"].median()
+    median_core = df_app["Core_Fraction_Pct"].median()
+    
+    low_to = df_app[df_app["Turnover_Pct"] <= median_turnover]
+    high_to = df_app[df_app["Turnover_Pct"] > median_turnover]
+    
+    low_core = df_app[df_app["Core_Fraction_Pct"] <= median_core]
+    high_core = df_app[df_app["Core_Fraction_Pct"] > median_core]
+    
+    print("\n" + "="*115)
+    print("【特徵中位數分組拆解 (Applicability Split Analysis)】")
+    print("="*115)
+    print(f"1. 換手率 (Turnover Pct) 分組 (中位數 = {median_turnover:.4f}%):")
+    print(f"  * 低換手率組 (N={len(low_to)}): Model v1 勝率={low_to['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={low_to['V2_Bounce'].mean()*100:.2f}%, Baseline 勝率={low_to['VP_Bounce'].mean()*100:.2f}% (v1超額={low_to['V1_Premium'].mean()*100:+.2f}%)")
+    print(f"  * 高換手率組 (N={len(high_to)}): Model v1 勝率={high_to['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={high_to['V2_Bounce'].mean()*100:.2f}%, Baseline 勝率={high_to['VP_Bounce'].mean()*100:.2f}% (v1超額={high_to['V1_Premium'].mean()*100:+.2f}%)")
+    
+    print(f"\n2. 大戶集保比例 (Core Fraction) 分組 (中位數 = {median_core:.2f}%):")
+    print(f"  * 低大戶比例組 (N={len(low_core)}): Model v1 勝率={low_core['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={low_core['V2_Bounce'].mean()*100:.2f}% (v1-v2 溢價={low_core['V1_vs_V2_Premium'].mean()*100:+.2f}%)")
+    print(f"  * 高大戶比例組 (N={len(high_core)}): Model v1 勝率={high_core['V1_Bounce'].mean()*100:.2f}%, Model v2 勝率={high_core['V2_Bounce'].mean()*100:.2f}% (v1-v2 溢價={high_core['V1_vs_V2_Premium'].mean()*100:+.2f}%)")
+    print("="*115 + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -491,7 +599,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.symbols.strip().lower() == "all":
-        # Find all 130 common stocks that have both daily price and shareholder concentration files
         loader = DataLoader()
         prices_csv = loader.yahoo_dir / "raw_yahoo_finance_daily_price.csv"
         conc_csv = loader.goodinfo_dir / "raw_equity_class_his.csv"
