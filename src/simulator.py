@@ -14,16 +14,23 @@ class CostSimulator:
     - Dynamic bin sizing.
     - Hourly intraday data distribution (optional).
     """
-    def __init__(self, bin_size: float = 0.5, decay_multiplier: float = 1.0, stock_code: Optional[str] = None):
+    def __init__(self, bin_size: float = 0.5, decay_multiplier: float = 1.0, stock_code: Optional[str] = None, model_type: str = "double_pool_dynamic"):
         self.bin_size = bin_size
         self.decay_multiplier = decay_multiplier
         self.stock_code = stock_code
+        self.model_type = model_type
         
-        # Dual-Pool Decay fractions (default static baseline)
-        self.active_fraction = 0.40
-        self.core_fraction = 0.60
-        self.active_decay_factor = 1.5
-        self.core_decay_factor = 0.1
+        # Dual-Pool Decay fractions
+        if model_type == "single_pool":
+            self.active_fraction = 1.0
+            self.core_fraction = 0.0
+            self.active_decay_factor = 1.0
+            self.core_decay_factor = 0.0
+        else: # double_pool_static or double_pool_dynamic
+            self.active_fraction = 0.40
+            self.core_fraction = 0.60
+            self.active_decay_factor = 1.5
+            self.core_decay_factor = 0.1
         
         # Two pools representing the cost distribution
         self.active_dist: Dict[float, float] = {}
@@ -220,7 +227,7 @@ class CostSimulator:
         
         # Prepare concentration records sorted by date
         conc_records = []
-        if shareholder_concentration is not None and not shareholder_concentration.empty:
+        if self.model_type == "double_pool_dynamic" and shareholder_concentration is not None and not shareholder_concentration.empty:
             for _, r in shareholder_concentration.iterrows():
                 conc_records.append((r["Date"], r["Core_Fraction"], r["Active_Fraction"]))
         conc_records.sort(key=lambda x: x[0])
@@ -316,7 +323,7 @@ class CostSimulator:
         }
         
         conc_records = []
-        if shareholder_concentration is not None and not shareholder_concentration.empty:
+        if self.model_type == "double_pool_dynamic" and shareholder_concentration is not None and not shareholder_concentration.empty:
             for _, r in shareholder_concentration.iterrows():
                 conc_records.append((r["Date"], r["Core_Fraction"], r["Active_Fraction"]))
         conc_records.sort(key=lambda x: x[0])

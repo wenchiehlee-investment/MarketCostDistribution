@@ -237,8 +237,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.symbols.strip().lower() == "all":
-        repo_root = Path(__file__).resolve().parent.parent
-        focus_csv = repo_root / "data" / "StockID_TWSE_TPEX_focus.csv"
+        focus_csv = Path("C:/Users/WJLEE/SynologyDrive/NAS/github.com/biztrends.TW/StockID_TWSE_TPEX_focus.csv")
         if not focus_csv.exists():
             print(f"Error: Focus list CSV not found at {focus_csv}")
             sys.exit(1)
