@@ -154,7 +154,8 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
     including the actual annualized single-sided weight-based turnover.
     """
     if not trade_signals:
-        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0}
+        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0,
+                "avg_hold": 0.0, "avg_concurrent": 0.0}
         
     daily_active_trades = {}
     for idx, sig in enumerate(trade_signals):
@@ -171,7 +172,8 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
             daily_active_trades[d].append((trade_id, ret))
             
     if not daily_active_trades:
-        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0}
+        return {"return": 0.0, "vol": 0.0, "sharpe": 0.0, "sortino": 0.0, "mdd": 0.0, "pf": 0.0, "turnover": 0.0,
+                "avg_hold": 0.0, "avg_concurrent": 0.0}
         
     sorted_dates = sorted(daily_active_trades.keys())
     
@@ -207,6 +209,13 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
     total_years = len(sorted_dates) / 252.0 if len(sorted_dates) > 0 else 1.0
     annualized_turnover = sum(daily_turnovers) / total_years if total_years > 0 else 0.0
     
+    # Average holding days and concurrent positions
+    hold_days = [len(sig.get("trade_dates", [])) for sig in trade_signals]
+    avg_hold = np.mean(hold_days) if hold_days else 0.0
+    
+    concurrent_counts = [len(daily_active_trades[d]) for d in sorted_dates]
+    avg_concurrent = np.mean(concurrent_counts) if concurrent_counts else 0.0
+    
     # Calculate metrics
     mean_ret = np.mean(portfolio_daily_returns)
     std_ret = np.std(portfolio_daily_returns)
@@ -236,7 +245,9 @@ def calculate_portfolio_metrics(trade_signals: list, friction_cost: float = 0.0)
         "sortino": sortino,
         "mdd": mdd,
         "pf": pf,
-        "turnover": annualized_turnover
+        "turnover": annualized_turnover,
+        "avg_hold": avg_hold,
+        "avg_concurrent": avg_concurrent
     }
 
 def run_multiple_regression(X_df: pd.DataFrame, y: np.ndarray) -> dict:
@@ -350,6 +361,12 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         
     bin_size = 1.0 if symbol in ["2330", "2454", "3034"] else 0.5
     
+    # Calculate True Range and 20-day ATR
+    tr = np.maximum(df_prices["High"] - df_prices["Low"], 
+                    np.maximum(abs(df_prices["High"] - df_prices["Close"].shift(1)), 
+                               abs(df_prices["Low"] - df_prices["Close"].shift(1))))
+    df_prices["ATR_20"] = tr.rolling(20).mean()
+    
     df_prices["SMA_200"] = df_prices["Close"].rolling(200).mean()
     rolling_vol = df_prices["Volume"].rolling(20).sum()
     rolling_pv = (df_prices["Close"] * df_prices["Volume"]).rolling(20).sum()
@@ -392,7 +409,6 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         vwap_val = df_prices.iloc[idx - 1]["Rolling_VWAP"]
         
         # Check touch of peaks
-        # For stock-date level uniqueness, we only select the first touched peak on this day
         vp_touch_peak = next((p for p in vp_peaks if prev_close >= p and low <= p <= high), None)
         v1_touch_peak = next((p for p in v1_peaks if prev_close >= p and low <= p <= high), None)
         v2_touch_peak = next((p for p in v2_peaks if prev_close >= p and low <= p <= high), None)
@@ -479,6 +495,10 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
             pre_ret_5d = (df_prices.iloc[idx_val]["Close"] - df_prices.iloc[idx_val-5]["Close"]) / df_prices.iloc[idx_val-5]["Close"] if idx_val >= 5 else 0.0
             pre_ret_20d = (df_prices.iloc[idx_val]["Close"] - df_prices.iloc[idx_val-20]["Close"]) / df_prices.iloc[idx_val-20]["Close"] if idx_val >= 20 else 0.0
             
+            # ATR-normalized pre-touch momentum (Z-score)
+            atr_val = df_prices.iloc[idx_val]["ATR_20"]
+            pre_mom_z = (df_prices.iloc[idx_val]["Close"] - df_prices.iloc[idx_val-5]["Close"]) / atr_val if (pd.notna(atr_val) and atr_val > 0) else 0.0
+            
             # 60-day Drawdown from peak prior to touch
             high_60d = df_prices.iloc[max(0, idx_val-60):idx_val+1]["High"].max()
             pre_dd_60d = (df_prices.iloc[idx_val]["Close"] - high_60d) / high_60d if high_60d > 0 else 0.0
@@ -500,6 +520,7 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                 "ret_20d": ret_20d,
                 "pre_ret_5d": pre_ret_5d,
                 "pre_ret_20d": pre_ret_20d,
+                "pre_mom_z": pre_mom_z,
                 "pre_dd_60d": pre_dd_60d,
                 "mae": mae,
                 "mfe": mfe,
@@ -615,6 +636,7 @@ def print_quant_ab_test_report(results_list: list):
     # Pre-touch momentum & drawdowns
     pre_5d = {k: [] for k in model_keys}
     pre_20d = {k: [] for k in model_keys}
+    pre_z = {k: [] for k in model_keys}
     pre_dd = {k: [] for k in model_keys}
     
     wilcoxon_stocks = []
@@ -733,6 +755,7 @@ def print_quant_ab_test_report(results_list: list):
             ret_20d[k].extend([s["ret_20d"] for s in r[k]])
             pre_5d[k].extend([s["pre_ret_5d"] for s in r[k]])
             pre_20d[k].extend([s["pre_ret_20d"] for s in r[k]])
+            pre_z[k].extend([s["pre_mom_z"] for s in r[k]])
             pre_dd[k].extend([s["pre_dd_60d"] for s in r[k]])
             mae[k].extend([s["mae"] for s in r[k]])
             mfe[k].extend([s["mfe"] for s in r[k]])
@@ -759,14 +782,12 @@ def print_quant_ab_test_report(results_list: list):
     print("\n" + "="*115)
     print("【交易策略模擬績效與交易摩擦敏感度對比 (-3% 止損 / +8% 止盈)】")
     print("="*115)
-    print(f"{'模型名稱':<35} | {'摩擦=0.0% (Sharpe/年化)':<22} | {'摩擦=0.414% (Sharpe/年化)':<22} | {'摩擦=0.60% (Sharpe/年化)':<22} | {'摩擦=0.90% (Sharpe/年化)':<22} | {'年化周轉率'}")
+    print(f"{'模型名稱':<33} | {'摩擦=0.0% (Sharpe/年化)':<22} | {'摩擦=0.414% (Sharpe/年化)':<22} | {'年化周轉':<8} | {'均持倉日':<8} | {'均並行倉位'}")
     print("-"*115)
     for k in model_keys:
         p_00 = calculate_portfolio_metrics(signals[k], friction_cost=0.0)
         p_04 = calculate_portfolio_metrics(signals[k], friction_cost=0.00414)
-        p_06 = calculate_portfolio_metrics(signals[k], friction_cost=0.006)
-        p_09 = calculate_portfolio_metrics(signals[k], friction_cost=0.009)
-        print(f"{model_names[k]:<35} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_06['sharpe']:.2f} / {p_06['return']*100:+.2f}% | {p_09['sharpe']:.2f} / {p_09['return']*100:+.2f}% | {p_04['turnover']:.1f}x")
+        print(f"{model_names[k]:<33} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_04['turnover']:.1f}x   | {p_04['avg_hold']:.1f}d     | {p_04['avg_concurrent']:.1f}")
     print("="*115)
     
     # Print Table 3: V1 vs V2 Signal Partition Analysis (Corrected to be 100% consistent with totals)
@@ -813,13 +834,14 @@ def print_quant_ab_test_report(results_list: list):
     print("\n" + "="*115)
     print("【信號觸發前置動量與回撤分析 (Pre-touch Momentum & Drawdown Analysis)】")
     print("="*115)
-    print(f"{'模型特徵':<38} | {'5日均前置報酬':<15} | {'20日均前置報酬':<15} | {'60日均前置最大回撤'}")
+    print(f"{'模型特徵':<38} | {'5日均前置報酬':<15} | {'20日均前置報酬':<15} | {'ATR前置動量(Z)':<15} | {'60日均前置最大回撤'}")
     print("-"*115)
     for k in model_keys:
         p5 = np.mean(pre_5d[k]) * 100 if pre_5d[k] else 0.0
         p20 = np.mean(pre_20d[k]) * 100 if pre_20d[k] else 0.0
+        pz = np.mean(pre_z[k]) if pre_z[k] else 0.0
         pdd = np.mean(pre_dd[k]) * 100 if pre_dd[k] else 0.0
-        print(f"{model_names[k]:<38} | {p5:+.2f}%          | {p20:+.2f}%          | {pdd:+.2f}%")
+        print(f"{model_names[k]:<38} | {p5:+.2f}%          | {p20:+.2f}%          | {pz:+.4f}          | {pdd:+.2f}%")
     print("="*115)
     
     # Print Invariant check
@@ -906,6 +928,20 @@ def print_quant_ab_test_report(results_list: list):
         print("="*115)
         print(f"  * 樣本外低值組 (N={len(low_group)}): Model v1 勝率={low_group['V1_Bounce'].mean()*100:.2f}%, Baseline 勝率={low_group['VP_Bounce'].mean()*100:.2f}% (超額勝率={low_group['V1_Premium'].mean()*100:+.2f}%)")
         print(f"  * 樣本外高值組 (N={len(high_group)}): Model v1 勝率={high_group['V1_Bounce'].mean()*100:.2f}%, Baseline 勝率={high_group['VP_Bounce'].mean()*100:.2f}% (超額勝率={high_group['V1_Premium'].mean()*100:+.2f}%)")
+        print("="*115)
+        
+        # Out-of-sample Threshold Sensitivity Analysis
+        print("\n" + "="*115)
+        print("【適用性閾值敏感度分析 (OOS Threshold Sensitivity Analysis)】")
+        print("="*115)
+        print(f"{'週轉率閾值':<15} | {'低值組 N':<10} | {'低值組超額勝率':<15} | {'高值組 N':<10} | {'高值組超額勝率'}")
+        print("-"*115)
+        for t_val in [0.8, 0.9, 1.0, 1.1, 1.2]:
+            lg = df_test_app[df_test_app["Turnover_Pct"] <= t_val]
+            hg = df_test_app[df_test_app["Turnover_Pct"] > t_val]
+            lg_prem = lg["V1_Premium"].mean() * 100 if len(lg) > 0 else 0.0
+            hg_prem = hg["V1_Premium"].mean() * 100 if len(hg) > 0 else 0.0
+            print(f"{t_val:.1f}%           | {len(lg):<10} | {lg_prem:+.2f}%        | {len(hg):<10} | {hg_prem:+.2f}%")
         print("="*115 + "\n")
 
 if __name__ == "__main__":
