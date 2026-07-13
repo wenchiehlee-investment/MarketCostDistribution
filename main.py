@@ -150,12 +150,30 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
         )
         click.echo(f"視覺化圖表已存檔至: {chart_path.resolve()}")
         
-        # Export raw cost distribution to CSV
+        # Export raw cost distribution to CSV (including trust_level)
         csv_path = output_dir_path / f"{symbol}_cost_distribution.csv"
-        dist_data = [{"price": k, "weight": v} for k, v in sorted(final_dist.items())]
+        
+        # Calculate trust level
+        trust_level = "未知 (Unknown)"
+        if "Turnover_Rate" in df_hist.columns:
+            avg_turnover_pct = df_hist['Turnover_Rate'].mean() * 100
+            lockup_heavy = ["2412", "3045"]
+            if symbol in lockup_heavy:
+                trust_level = "中低 (Medium-Low) - 股權鎖定重"
+            elif avg_turnover_pct >= 0.4:
+                trust_level = "極高 (Very High)"
+            elif avg_turnover_pct >= 0.25:
+                trust_level = "高 (High)"
+            elif avg_turnover_pct >= 0.12:
+                trust_level = "中 (Medium)"
+            else:
+                trust_level = "低 (Low)"
+                
+        dist_data = [{"price": k, "weight": v, "trust_level": trust_level} for k, v in sorted(final_dist.items())]
         df_dist = pd.DataFrame(dist_data)
         df_dist.to_csv(csv_path, index=False)
         click.echo(f"市場籌碼成本分佈數據已存檔至: {csv_path.resolve()}")
+
 
 
 if __name__ == "__main__":

@@ -172,9 +172,9 @@ def main():
             plt.savefig(perc_chart_path, dpi=150, bbox_inches='tight')
             plt.close('all')
             
-            # Export raw cost distribution to CSV
+            # Export raw cost distribution to CSV (including trust_level)
             csv_path = output_dir / f"{symbol}_cost_distribution.csv"
-            dist_data = [{"price": k, "weight": v} for k, v in sorted(final_dist.items())]
+            dist_data = [{"price": k, "weight": v, "trust_level": trust_level} for k, v in sorted(final_dist.items())]
             df_dist = pd.DataFrame(dist_data)
             df_dist.to_csv(csv_path, index=False)
             

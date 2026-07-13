@@ -14,6 +14,8 @@ This file defines the schema of the generated market cost distribution CSV files
 | :--- | :---: | :--- |
 | **price** | Float | The transaction price bin (in NTD). The pricing bin interval (e.g. 0.05, 0.1, 0.5, 1.0, 5.0) is dynamically computed based on the stock's first-day close price to balance resolution and computational efficiency. |
 | **weight** | Float | The estimated proportion of outstanding shares held at this price bin (represented as a ratio between `0.0` and `1.0`). The sum of all weights in a single CSV file is normalized to exactly `1.0`. |
+| **trust_level** | String | The reliability rating of the cost distribution estimation for this stock (e.g., `Very High`, `High`, `Medium`, `Low`, or `Medium-Low` for lockups). This value is identical for all rows of a given stock. |
+
 
 ---
 
