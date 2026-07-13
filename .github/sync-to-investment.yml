@@ -1,0 +1,9 @@
+# .github/sync-to-investment.yml
+group:
+  - files:
+      - source: output/*_cost_distribution.csv
+        dest:   data/MarketCostDistribution/
+      - source: raw_column_definition_MarketCostDistribution.md
+        dest:   definitions/raw_column_definition_MarketCostDistribution.md
+    repos: |
+      wenchiehlee/mkdocs-investment

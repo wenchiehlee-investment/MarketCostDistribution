@@ -10,7 +10,9 @@ env/
 
 # Data and Outputs
 data/
-output/
+output/*
+!output/*.csv
+
 
 # IDEs
 .vscode/

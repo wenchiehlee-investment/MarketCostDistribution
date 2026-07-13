@@ -172,14 +172,23 @@ def main():
             plt.savefig(perc_chart_path, dpi=150, bbox_inches='tight')
             plt.close('all')
             
+            # Export raw cost distribution to CSV
+            csv_path = output_dir / f"{symbol}_cost_distribution.csv"
+            dist_data = [{"price": k, "weight": v} for k, v in sorted(final_dist.items())]
+            df_dist = pd.DataFrame(dist_data)
+            df_dist.to_csv(csv_path, index=False)
+            
             # 6. Copy to artifact dir
             dest_dual = artifact_dir / f"{symbol}_cost_distribution.png"
             dest_perc = artifact_dir / f"{symbol}_cost_distribution_percentage.png"
+            dest_csv = artifact_dir / f"{symbol}_cost_distribution.csv"
             
             # Python copy
             import shutil
             shutil.copy(str(chart_path), str(dest_dual))
             shutil.copy(str(perc_chart_path), str(dest_perc))
+            shutil.copy(str(csv_path), str(dest_csv))
+
             
             results.append({
                 "Symbol": symbol,

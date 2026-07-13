@@ -149,6 +149,14 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
             shares_outstanding=shares_outstanding
         )
         click.echo(f"視覺化圖表已存檔至: {chart_path.resolve()}")
+        
+        # Export raw cost distribution to CSV
+        csv_path = output_dir_path / f"{symbol}_cost_distribution.csv"
+        dist_data = [{"price": k, "weight": v} for k, v in sorted(final_dist.items())]
+        df_dist = pd.DataFrame(dist_data)
+        df_dist.to_csv(csv_path, index=False)
+        click.echo(f"市場籌碼成本分佈數據已存檔至: {csv_path.resolve()}")
+
 
 if __name__ == "__main__":
     main()
