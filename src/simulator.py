@@ -8,6 +8,7 @@ class CostSimulator:
     It supports:
     - Free-float turnover rate calculation (Refinement 1).
     - Dual-Pool Decay Model (Refinement 2: Active Pool vs. Core Pool).
+    - Dynamic Weekly Shareholder Concentration Calibration.
     - Triangular Price Range Distribution (Refinement 3).
     - Corporate actions price adjustments on both pools (Refinement 4).
     - Dynamic bin sizing.
@@ -18,7 +19,7 @@ class CostSimulator:
         self.decay_multiplier = decay_multiplier
         self.stock_code = stock_code
         
-        # Dual-Pool Decay fractions
+        # Dual-Pool Decay fractions (default static baseline)
         self.active_fraction = 0.40
         self.core_fraction = 0.60
         self.active_decay_factor = 1.5
@@ -45,11 +46,29 @@ class CostSimulator:
         if total_w > 0:
             self.distribution = {k: v / total_w for k, v in self.distribution.items()}
 
-    def initialize_distribution(self, price: float):
+    def adjust_pool_fractions(self, new_active: float, new_core: float):
+        """Rescales the active and core pools to match new concentration fractions."""
+        active_sum = sum(self.active_dist.values())
+        if active_sum > 0:
+            scale = new_active / active_sum
+            self.active_dist = {k: v * scale for k, v in self.active_dist.items()}
+            
+        core_sum = sum(self.core_dist.values())
+        if core_sum > 0:
+            scale = new_core / core_sum
+            self.core_dist = {k: v * scale for k, v in self.core_dist.items()}
+            
+        self.active_fraction = new_active
+        self.core_fraction = new_core
+        self.update_main_distribution()
+
+    def initialize_distribution(self, price: float, active_fraction: float = 0.40, core_fraction: float = 0.60):
         """Initializes both active and core pools at a single price point."""
         bin_center = self.get_bin(price)
-        self.active_dist = {bin_center: self.active_fraction}
-        self.core_dist = {bin_center: self.core_fraction}
+        self.active_fraction = active_fraction
+        self.core_fraction = core_fraction
+        self.active_dist = {bin_center: active_fraction}
+        self.core_dist = {bin_center: core_fraction}
         self.update_main_distribution()
 
     def apply_turnover_decay(self, turnover_rate: float) -> float:
@@ -57,7 +76,6 @@ class CostSimulator:
         Decays the active pool and core pool separately based on their decay factors.
         Returns the total weight removed to be re-distributed.
         """
-        # Active Pool Decay
         decay_active = min(max(turnover_rate * self.active_decay_factor * self.decay_multiplier, 0.0), 1.0)
         removed_active = 0.0
         new_active = {}
@@ -68,7 +86,6 @@ class CostSimulator:
                 new_active[price_bin] = decayed_weight
         self.active_dist = new_active
 
-        # Core Pool Decay
         decay_core = min(max(turnover_rate * self.core_decay_factor * self.decay_multiplier, 0.0), 1.0)
         removed_core = 0.0
         new_core = {}
@@ -189,6 +206,7 @@ class CostSimulator:
         df_prices: pd.DataFrame, 
         shares_outstanding: float, 
         corporate_actions: List[Dict],
+        shareholder_concentration: Optional[pd.DataFrame] = None,
         stock_code: Optional[str] = None
     ) -> List[Dict]:
         """Runs daily simulation using the new multi-pool and distributed framework."""
@@ -199,15 +217,44 @@ class CostSimulator:
         actions_by_date = {
             act["Date"].strftime("%Y-%m-%d"): act for act in corporate_actions
         }
+        
+        # Prepare concentration records sorted by date
+        conc_records = []
+        if shareholder_concentration is not None and not shareholder_concentration.empty:
+            for _, r in shareholder_concentration.iterrows():
+                conc_records.append((r["Date"], r["Core_Fraction"], r["Active_Fraction"]))
+        conc_records.sort(key=lambda x: x[0])
 
         history_records = []
+        conc_idx = 0
         
         for idx, row in df_prices.iterrows():
-            date_str = row["Date"].strftime("%Y-%m-%d")
+            current_date = row["Date"]
+            date_str = current_date.strftime("%Y-%m-%d")
             close_price = row["Close"]
             high_price = row["High"]
             low_price = row["Low"]
             volume = row["Volume"]
+            
+            # Find latest shareholder concentration on or before current_date
+            today_core = self.core_fraction
+            today_active = self.active_fraction
+            while conc_idx < len(conc_records) and conc_records[conc_idx][0] <= current_date:
+                _, c_frac, a_frac = conc_records[conc_idx]
+                today_core = c_frac
+                today_active = a_frac
+                conc_idx += 1
+                
+            if conc_idx > 0:
+                _, today_core, today_active = conc_records[conc_idx - 1]
+                
+            # If concentration changed, dynamically rescale the pools
+            if abs(today_core - self.core_fraction) > 1e-5 or abs(today_active - self.active_fraction) > 1e-5:
+                if self.distribution:
+                    self.adjust_pool_fractions(today_active, today_core)
+                else:
+                    self.active_fraction = today_active
+                    self.core_fraction = today_core
             
             if date_str in actions_by_date:
                 action = actions_by_date[date_str]
@@ -229,7 +276,7 @@ class CostSimulator:
             turnover_rate = min(max(turnover_rate, 0.0), 0.20)
 
             if not self.distribution:
-                self.initialize_distribution(vwap)
+                self.initialize_distribution(vwap, self.active_fraction, self.core_fraction)
             else:
                 removed_weight = self.apply_turnover_decay(turnover_rate)
                 dist_contrib = self.distribute_daily_volume(low_price, high_price, vwap, removed_weight)
@@ -240,7 +287,7 @@ class CostSimulator:
             snapshot = {k: v for k, v in self.distribution.items() if v > 1e-5}
             
             history_records.append({
-                "Date": row["Date"],
+                "Date": current_date,
                 "Close": close_price,
                 "VWAP": vwap,
                 "Turnover_Rate": turnover_rate,
@@ -254,9 +301,10 @@ class CostSimulator:
         df_hourly: pd.DataFrame,
         shares_outstanding: float,
         corporate_actions: List[Dict],
+        shareholder_concentration: Optional[pd.DataFrame] = None,
         stock_code: Optional[str] = None
     ) -> List[Dict]:
-        """Runs hourly intraday simulation using effective free-float shares."""
+        """Runs hourly intraday simulation using effective free-float shares and dynamic concentration."""
         current_stock_code = stock_code or self.stock_code
         free_float_ratio = self.get_free_float_ratio(current_stock_code)
         effective_shares = shares_outstanding * free_float_ratio if shares_outstanding > 0 else 0.0
@@ -267,11 +315,40 @@ class CostSimulator:
             act["Date"].strftime("%Y-%m-%d"): act for act in corporate_actions
         }
         
+        conc_records = []
+        if shareholder_concentration is not None and not shareholder_concentration.empty:
+            for _, r in shareholder_concentration.iterrows():
+                conc_records.append((r["Date"], r["Core_Fraction"], r["Active_Fraction"]))
+        conc_records.sort(key=lambda x: x[0])
+        
         history_records = []
         applied_actions_dates = set()
         df_hourly["Day_Str"] = df_hourly["Date"].dt.strftime("%Y-%m-%d")
         
+        conc_idx = 0
+        
         for day_str, day_group in df_hourly.groupby("Day_Str"):
+            day_date = pd.to_datetime(day_str)
+            
+            # Find latest concentration
+            today_core = self.core_fraction
+            today_active = self.active_fraction
+            while conc_idx < len(conc_records) and conc_records[conc_idx][0] <= day_date:
+                _, c_frac, a_frac = conc_records[conc_idx]
+                today_core = c_frac
+                today_active = a_frac
+                conc_idx += 1
+                
+            if conc_idx > 0:
+                _, today_core, today_active = conc_records[conc_idx - 1]
+                
+            if abs(today_core - self.core_fraction) > 1e-5 or abs(today_active - self.active_fraction) > 1e-5:
+                if self.distribution:
+                    self.adjust_pool_fractions(today_active, today_core)
+                else:
+                    self.active_fraction = today_active
+                    self.core_fraction = today_core
+
             if day_str in actions_by_date and day_str not in applied_actions_dates:
                 action = actions_by_date[day_str]
                 self.apply_corporate_action(
@@ -291,12 +368,11 @@ class CostSimulator:
                 day_volume += h_volume
                 
                 h_vwap = (h_high + h_low + h_close) / 3.0 if (h_high > 0 and h_low > 0) else h_close
-                
                 h_turnover = h_volume / effective_shares if effective_shares > 0 else 0.002
                 h_turnover = min(max(h_turnover, 0.0), 0.05)
                 
                 if not self.distribution:
-                    self.initialize_distribution(h_vwap)
+                    self.initialize_distribution(h_vwap, self.active_fraction, self.core_fraction)
                 else:
                     removed = self.apply_turnover_decay(h_turnover)
                     self.add_new_cost(h_vwap, removed)
@@ -305,7 +381,7 @@ class CostSimulator:
             snapshot = {k: v for k, v in self.distribution.items() if v > 1e-5}
             
             history_records.append({
-                "Date": pd.to_datetime(day_str),
+                "Date": day_date,
                 "Close": day_close,
                 "VWAP": day_close,
                 "Turnover_Rate": day_volume / effective_shares if effective_shares > 0 else 0.0,

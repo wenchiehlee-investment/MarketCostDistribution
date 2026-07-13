@@ -30,10 +30,17 @@ def evaluate_closed_loop(symbol: str, warmup_days: int = 250) -> dict:
     loader = DataLoader()
     df_prices = loader.load_daily_prices(symbol)
     shares_outstanding = loader.load_shares_outstanding(symbol)
+    shareholder_concentration = loader.load_weekly_shareholder_concentration(symbol)
     
     # Run simulation day-by-day
     simulator = CostSimulator(bin_size=1.0 if symbol in ["2330", "2454", "3034"] else 0.5)
-    history = simulator.run_daily_simulation(df_prices, shares_outstanding, [], stock_code=symbol)
+    history = simulator.run_daily_simulation(
+        df_prices, 
+        shares_outstanding, 
+        [], 
+        shareholder_concentration=shareholder_concentration,
+        stock_code=symbol
+    )
     
     total_support_tests = 0
     successful_support_bounces = 0

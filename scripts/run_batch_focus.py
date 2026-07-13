@@ -71,10 +71,17 @@ def main():
             # 1. Load data
             df_prices = loader.load_daily_prices(symbol)
             shares_outstanding = loader.load_shares_outstanding(symbol)
+            shareholder_concentration = loader.load_weekly_shareholder_concentration(symbol)
             
             # 2. Run simulation
             simulator = CostSimulator(bin_size=5.0)
-            history_records = simulator.run_daily_simulation(df_prices, shares_outstanding, [], stock_code=symbol)
+            history_records = simulator.run_daily_simulation(
+                df_prices, 
+                shares_outstanding, 
+                [], 
+                shareholder_concentration=shareholder_concentration,
+                stock_code=symbol
+            )
             
             # 3. Calculate metrics
             final_dist = simulator.distribution

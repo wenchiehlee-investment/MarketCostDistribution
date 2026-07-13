@@ -185,3 +185,50 @@ class DataLoader:
         # Sort chronologically
         final_actions.sort(key=lambda x: x["Date"])
         return final_actions
+
+    def load_weekly_shareholder_concentration(self, stock_code: str) -> pd.DataFrame:
+        """
+        Loads the weekly shareholder concentration history for a given stock.
+        Returns a DataFrame containing:
+        - Date: Timestamp (weekly date)
+        - Core_Fraction: float (proportion of shares held by holders of > 1000 shares)
+        - Active_Fraction: float (1.0 - Core_Fraction)
+        """
+        csv_path = self.goodinfo_dir / "raw_equity_class_his.csv"
+        if not csv_path.exists():
+            return pd.DataFrame(columns=["Date", "Core_Fraction", "Active_Fraction"])
+            
+        stock_code_str = str(stock_code).strip()
+        df = pd.read_csv(csv_path, dtype={"stock_code": str}, encoding="utf-8-sig")
+        df = df[df["stock_code"] == stock_code_str].copy()
+        
+        if df.empty:
+            return pd.DataFrame(columns=["Date", "Core_Fraction", "Active_Fraction"])
+            
+        # Filter out rows where Date or weekly class is "-"
+        df = df[(df["統計_日期"] != "-") & (df["統計_日期"].notna())].copy()
+        df = df[df["週別"].str.len() >= 2].copy()
+        
+        if df.empty:
+            return pd.DataFrame(columns=["Date", "Core_Fraction", "Active_Fraction"])
+            
+        # Reconstruct the full date: 20YY-MM-DD
+        df["Year"] = "20" + df["週別"].str[:2]
+        df["Full_Date"] = df["Year"] + "-" + df["統計_日期"].str.replace("/", "-")
+        df["Date"] = pd.to_datetime(df["Full_Date"], errors="coerce")
+        df = df.dropna(subset=["Date"])
+        
+        # Calculate Core_Fraction based on '持股_大於1千張_pct'
+        large_holder_col = "持股_大於1千張_pct"
+        if large_holder_col in df.columns:
+            df["Core_Fraction"] = pd.to_numeric(df[large_holder_col], errors="coerce").fillna(60.0) / 100.0
+        else:
+            df["Core_Fraction"] = 0.60
+            
+        # Ensure it stays in a sane range [0.10, 0.90]
+        df["Core_Fraction"] = df["Core_Fraction"].clip(0.10, 0.90)
+        df["Active_Fraction"] = 1.0 - df["Core_Fraction"]
+        
+        # Keep only required columns and sort chronologically
+        df = df[["Date", "Core_Fraction", "Active_Fraction"]].sort_values("Date").reset_index(drop=True)
+        return df

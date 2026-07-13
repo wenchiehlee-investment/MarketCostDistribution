@@ -57,6 +57,7 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
         df_prices = loader.load_daily_prices(symbol)
         shares_outstanding = loader.load_shares_outstanding(symbol)
         corporate_actions = loader.load_corporate_actions(symbol)
+        shareholder_concentration = loader.load_weekly_shareholder_concentration(symbol)
     except Exception as e:
         click.echo(f"[Error] 資料讀取失敗: {e}")
         sys.exit(1)
@@ -66,6 +67,7 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
     click.echo(f"  歷史價格天數: {len(df_prices)} 天 (時間範圍: {df_prices['Date'].min().strftime('%Y-%m-%d')} 至 {df_prices['Date'].max().strftime('%Y-%m-%d')})")
     click.echo(f"  目前發行股數: {shares_outstanding / 10**8:.2f} 億股")
     click.echo(f"  除權息日程事件: {len(corporate_actions)} 個")
+    click.echo(f"  週度大戶持股結構記錄: {len(shareholder_concentration)} 筆")
 
     # 2. 自動計算價格 Bin 大小
     if bin_size is None:
@@ -100,6 +102,7 @@ def main(symbol, bin_size, decay, output_dir, no_chart, apply_corp_actions):
         df_prices=df_prices,
         shares_outstanding=shares_outstanding,
         corporate_actions=simulation_actions,
+        shareholder_concentration=shareholder_concentration,
         stock_code=symbol
     )
     click.echo("模擬完成！")
