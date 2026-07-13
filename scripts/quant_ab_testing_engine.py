@@ -398,22 +398,21 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         sma_touch = (pd.notna(ma_val) and prev_close >= ma_val and low <= ma_val <= high)
         vwap_touch = (pd.notna(vwap_val) and prev_close >= vwap_val and low <= vwap_val <= high)
         
-        def get_trade_metrics(peak):
-            entry_price = df_prices.iloc[idx+1]["Open"]
+        def get_trade_metrics(peak, touch_date_val, idx_val):
+            entry_price = df_prices.iloc[idx_val+1]["Open"]
             if entry_price <= 0: return None
             stop_price = entry_price * 0.97
             target_price = entry_price * 1.08
             
             daily_returns = []
             trade_dates = []
-            exit_date = df_prices.iloc[idx+5]["Date"]
+            exit_date = df_prices.iloc[idx_val+5]["Date"]
             p_prev = entry_price
             
             is_ambiguous = 0
-            stopped_out = False
             
             for k in range(1, 6):
-                row_k = df_prices.iloc[idx + k]
+                row_k = df_prices.iloc[idx_val + k]
                 low_k, high_k, close_k = row_k["Low"], row_k["High"], row_k["Close"]
                 date_k = row_k["Date"]
                 
@@ -426,7 +425,6 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                     daily_returns.append((stop_price - p_prev) / p_prev)
                     trade_dates.append(date_k)
                     exit_date = date_k
-                    stopped_out = True
                     break
                 elif high_k >= target_price:
                     daily_returns.append((target_price - p_prev) / p_prev)
@@ -438,35 +436,69 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
                     trade_dates.append(date_k)
                     p_prev = close_k
                     
-            # First-passage success definition: reached peak*1.02 before hitting stop price
-            success = 0
+            # First-passage success paths
+            success_worst = 0
+            success_best = 0
             for k in range(1, 6):
-                row_k = df_prices.iloc[idx + k]
+                row_k = df_prices.iloc[idx_val + k]
                 low_k, high_k = row_k["Low"], row_k["High"]
+                
+                # Worst case: check stop first
                 if low_k <= stop_price:
-                    success = 0
+                    success_worst = 0
                     break
                 elif high_k >= peak * 1.02:
-                    success = 1
+                    success_worst = 1
                     break
                     
-            lows_5d = df_prices.iloc[idx+1:idx+6]["Low"].values
-            highs_5d = df_prices.iloc[idx+1:idx+6]["High"].values
+            for k in range(1, 6):
+                row_k = df_prices.iloc[idx_val + k]
+                low_k, high_k = row_k["Low"], row_k["High"]
+                
+                # Best case: check target first
+                if high_k >= peak * 1.02:
+                    success_best = 1
+                    break
+                elif low_k <= stop_price:
+                    success_best = 0
+                    break
+                    
+            success_exclude = None
+            if is_ambiguous == 0:
+                success_exclude = success_worst
+                
+            lows_5d = df_prices.iloc[idx_val+1:idx_val+6]["Low"].values
+            highs_5d = df_prices.iloc[idx_val+1:idx_val+6]["High"].values
             
-            ret_5d = (df_prices.iloc[idx+5]["Close"] - entry_price) / entry_price
-            ret_20d = (df_prices.iloc[idx+20]["Close"] - entry_price) / entry_price
+            ret_5d = (df_prices.iloc[idx_val+5]["Close"] - entry_price) / entry_price
+            ret_20d = (df_prices.iloc[idx_val+20]["Close"] - entry_price) / entry_price
+            
+            # Momentum prior to signal date
+            pre_ret_5d = (df_prices.iloc[idx_val]["Close"] - df_prices.iloc[idx_val-5]["Close"]) / df_prices.iloc[idx_val-5]["Close"] if idx_val >= 5 else 0.0
+            pre_ret_20d = (df_prices.iloc[idx_val]["Close"] - df_prices.iloc[idx_val-20]["Close"]) / df_prices.iloc[idx_val-20]["Close"] if idx_val >= 20 else 0.0
+            
+            # 60-day Drawdown from peak prior to touch
+            high_60d = df_prices.iloc[max(0, idx_val-60):idx_val+1]["High"].max()
+            pre_dd_60d = (df_prices.iloc[idx_val]["Close"] - high_60d) / high_60d if high_60d > 0 else 0.0
             
             mae = min(0.0, min((lows_5d - entry_price) / entry_price)) if len(lows_5d) > 0 else 0.0
             mfe = max(0.0, max((highs_5d - entry_price) / entry_price)) if len(highs_5d) > 0 else 0.0
             
             return {
-                "entry_date": df_prices.iloc[idx+1]["Date"],
+                "touch_date": touch_date_val,
+                "entry_date": df_prices.iloc[idx_val+1]["Date"],
                 "exit_date": exit_date,
                 "daily_returns": daily_returns,
                 "trade_dates": trade_dates,
-                "success": success,
+                "success": success_worst, # standard success is worst case
+                "success_worst": success_worst,
+                "success_best": success_best,
+                "success_exclude": success_exclude,
                 "ret_5d": ret_5d,
                 "ret_20d": ret_20d,
+                "pre_ret_5d": pre_ret_5d,
+                "pre_ret_20d": pre_ret_20d,
+                "pre_dd_60d": pre_dd_60d,
                 "mae": mae,
                 "mfe": mfe,
                 "is_ambiguous": is_ambiguous
@@ -478,21 +510,21 @@ def backtest_single_stock(symbol: str, warmup_days: int = 250) -> dict:
         
         if vp_touch:
             peak = next(p for p in vp_peaks if prev_close >= p and low <= p <= high)
-            vp_meta = get_trade_metrics(peak)
+            vp_meta = get_trade_metrics(peak, date_t, idx)
             if vp_meta: vp_signals.append(vp_meta)
         if v1_touch:
             peak = next(p for p in v1_peaks if prev_close >= p and low <= p <= high)
-            v1_meta = get_trade_metrics(peak)
+            v1_meta = get_trade_metrics(peak, date_t, idx)
             if v1_meta: v1_signals.append(v1_meta)
         if v2_touch:
             peak = next(p for p in v2_peaks if prev_close >= p and low <= p <= high)
-            v2_meta = get_trade_metrics(peak)
+            v2_meta = get_trade_metrics(peak, date_t, idx)
             if v2_meta: v2_signals.append(v2_meta)
         if sma_touch:
-            sma_meta = get_trade_metrics(ma_val)
+            sma_meta = get_trade_metrics(ma_val, date_t, idx)
             if sma_meta: sma_signals.append(sma_meta)
         if vwap_touch:
-            vwap_meta = get_trade_metrics(vwap_val)
+            vwap_meta = get_trade_metrics(vwap_val, date_t, idx)
             if vwap_meta: vwap_signals.append(vwap_meta)
             
         if vp_touch and v1_touch and v2_touch and vp_meta and v1_meta and v2_meta:
@@ -575,6 +607,17 @@ def print_quant_ab_test_report(results_list: list):
     mfe = {k: [] for k in model_keys}
     signals = {k: [] for k in model_keys}
     
+    # Path sensitivity tracking
+    bounces_best = {k: 0 for k in model_keys}
+    bounces_worst = {k: 0 for k in model_keys}
+    bounces_exclude = {k: 0 for k in model_keys}
+    touches_exclude = {k: 0 for k in model_keys}
+    
+    # Pre-touch momentum & drawdowns
+    pre_5d = {k: [] for k in model_keys}
+    pre_20d = {k: [] for k in model_keys}
+    pre_dd = {k: [] for k in model_keys}
+    
     wilcoxon_stocks = []
     bounce_rates_by_stock = {k: [] for k in model_keys}
     
@@ -585,14 +628,13 @@ def print_quant_ab_test_report(results_list: list):
     train_app_data = []
     test_app_data = []
     
-    # Event decomposition
+    # Signal partition sets
     v1_only_signals = []
     v2_only_signals = []
     both_signals_v1 = []
     both_signals_v2 = []
     
-    total_signals_count = 0
-    ambiguous_signals_count = 0
+    amb_count = {k: 0 for k in model_keys}
     
     for r in results_list:
         if r is None: continue
@@ -604,27 +646,30 @@ def print_quant_ab_test_report(results_list: list):
             for k in model_keys:
                 bounce_rates_by_stock[k].append(sum(s["success"] for s in r[k]) / len(r[k]))
                 
-        # Signal decomposition
-        v1_dates = {s["entry_date"]: s for s in r["v1"]}
-        v2_dates = {s["entry_date"]: s for s in r["v2"]}
-        both_dts = set(v1_dates.keys()) & set(v2_dates.keys())
-        v1_only_dts = set(v1_dates.keys()) - set(v2_dates.keys())
-        v2_only_dts = set(v2_dates.keys()) - set(v1_dates.keys())
+        # Correct set-membership partition logic to handle multiple same-day signal duplicates
+        common_dates = {ct[0] for ct in r["co_touches"]}
         
-        for d in both_dts:
-            both_signals_v1.append(v1_dates[d])
-            both_signals_v2.append(v2_dates[d])
-        for d in v1_only_dts:
-            v1_only_signals.append(v1_dates[d])
-        for d in v2_only_dts:
-            v2_only_signals.append(v2_dates[d])
-            
-        # Ambiguity ratio tracking
+        for s in r["v1"]:
+            if s["touch_date"] in common_dates:
+                both_signals_v1.append(s)
+            else:
+                v1_only_signals.append(s)
+                
+        for s in r["v2"]:
+            if s["touch_date"] in common_dates:
+                both_signals_v2.append(s)
+            else:
+                v2_only_signals.append(s)
+                
         for k in model_keys:
             for s in r[k]:
-                total_signals_count += 1
                 if s.get("is_ambiguous", 0) == 1:
-                    ambiguous_signals_count += 1
+                    amb_count[k] += 1
+                bounces_best[k] += s["success_best"]
+                bounces_worst[k] += s["success_worst"]
+                if s["success_exclude"] is not None:
+                    bounces_exclude[k] += s["success_exclude"]
+                    touches_exclude[k] += 1
                     
         # 1. Train applicability data (2016-2022)
         v1_tr_br = (sum(s["success"] for s in r["v1_train"]) / len(r["v1_train"])) if len(r["v1_train"]) > 0 else 0.0
@@ -671,6 +716,9 @@ def print_quant_ab_test_report(results_list: list):
             bounces[k] += sum(s["success"] for s in r[k])
             ret_5d[k].extend([s["ret_5d"] for s in r[k]])
             ret_20d[k].extend([s["ret_20d"] for s in r[k]])
+            pre_5d[k].extend([s["pre_ret_5d"] for s in r[k]])
+            pre_20d[k].extend([s["pre_ret_20d"] for s in r[k]])
+            pre_dd[k].extend([s["pre_dd_60d"] for s in r[k]])
             mae[k].extend([s["mae"] for s in r[k]])
             mfe[k].extend([s["mfe"] for s in r[k]])
             signals[k].extend(r[k])
@@ -706,7 +754,7 @@ def print_quant_ab_test_report(results_list: list):
         print(f"{model_names[k]:<35} | {p_00['sharpe']:.2f} / {p_00['return']*100:+.2f}% | {p_04['sharpe']:.2f} / {p_04['return']*100:+.2f}% | {p_06['sharpe']:.2f} / {p_06['return']*100:+.2f}% | {p_09['sharpe']:.2f} / {p_09['return']*100:+.2f}% | {p_04['turnover']:.1f}x")
     print("="*115)
     
-    # Print Table 3: V1 vs V2 Signal Partition Analysis
+    # Print Table 3: V1 vs V2 Signal Partition Analysis (Corrected to be 100% consistent with totals)
     print("\n" + "="*115)
     print("【Cost Model v1 vs. v2 信號集合拆解分析 (V1-only, V2-only, Common)】")
     print("="*115)
@@ -732,9 +780,32 @@ def print_quant_ab_test_report(results_list: list):
         print(f"{name:<25} | {cnt:<10} | {br_p:.2f}%        | {r5_p:+.2f}%        | {mae_p:.2f}%    | {mfe_p:.2f}%    | {net_p:+.2f}%")
     print("="*115)
     
-    # Print Ambiguity metrics
-    ambiguity_ratio = (ambiguous_signals_count / total_signals_count * 100) if total_signals_count > 0 else 0.0
-    print(f"\n* 交易路徑同日雙觸發 (Stop & Target同日觸及) 歧義事件數: {ambiguous_signals_count} / {total_signals_count} ({ambiguity_ratio:.2f}%)")
+    # Print Table 4: Path Ambiguity & Ranking Robustness sensitivity
+    print("\n" + "="*115)
+    print("【路徑歧義與評估排名穩定性敏感度分析】")
+    print("="*115)
+    print(f"{'模型名稱':<35} | {'歧義事件數':<10} | {'歧義比例 (%)':<13} | {'勝率 (Worst-case)':<18} | {'勝率 (Best-case)':<18} | {'勝率 (Exclude)'}")
+    print("-"*115)
+    for k in model_keys:
+        ratio = (amb_count[k] / touches[k] * 100) if touches[k] > 0 else 0.0
+        worst_br = (bounces_worst[k] / touches[k] * 100) if touches[k] > 0 else 0.0
+        best_br = (bounces_best[k] / touches[k] * 100) if touches[k] > 0 else 0.0
+        exc_br = (bounces_exclude[k] / touches_exclude[k] * 100) if touches_exclude[k] > 0 else 0.0
+        print(f"{model_names[k]:<35} | {amb_count[k]:<10} | {ratio:.2f}%       | {worst_br:.2f}%           | {best_br:.2f}%           | {exc_br:.2f}%")
+    print("="*115)
+    
+    # Print Table 5: Pre-touch momentum analysis (Catastrophic Drop check)
+    print("\n" + "="*115)
+    print("【信號觸發前置動量與回撤分析 (Pre-touch Momentum & Drawdown Analysis)】")
+    print("="*115)
+    print(f"{'模型特徵':<38} | {'5日均前置報酬':<15} | {'20日均前置報酬':<15} | {'60日均前置最大回撤'}")
+    print("-"*115)
+    for k in model_keys:
+        p5 = np.mean(pre_5d[k]) * 100 if pre_5d[k] else 0.0
+        p20 = np.mean(pre_20d[k]) * 100 if pre_20d[k] else 0.0
+        pdd = np.mean(pre_dd[k]) * 100 if pre_dd[k] else 0.0
+        print(f"{model_names[k]:<38} | {p5:+.2f}%          | {p20:+.2f}%          | {pdd:+.2f}%")
+    print("="*115)
     
     # McNemar & Wilcoxon
     print("\n" + "="*115)
