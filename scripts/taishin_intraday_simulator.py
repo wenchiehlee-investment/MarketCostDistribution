@@ -143,6 +143,13 @@ def main():
     # Sort chronologically (ascending date)
     df_hourly = df_hourly.sort_values("Date").reset_index(drop=True)
     
+    # Save downloaded high-frequency data to local CSV
+    intraday_data_dir = Path(__file__).resolve().parent.parent / "data" / "Taishin.Intraday"
+    intraday_data_dir.mkdir(parents=True, exist_ok=True)
+    csv_data_path = intraday_data_dir / f"{symbol}_intraday_{timeframe}m.csv"
+    df_hourly.to_csv(csv_data_path, index=False)
+    print(f"  * 高頻資料已快取至本地 CSV: {csv_data_path.resolve()}")
+    
     # 4. Load basic parameters
     loader = DataLoader()
     company_name = get_company_name(loader.data_dir, symbol)
