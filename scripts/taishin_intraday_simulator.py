@@ -6,6 +6,15 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# Reconfigure stdout/stderr for UTF-8 output on Windows
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # Add repo root to path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -72,13 +81,8 @@ def main():
         
     cert_path = str(Path("C:/Users/WJLEE/SynologyDrive/NAS/github.com/GoogleSheet.Banks") / creds["cert_rel_path"])
     
-    symbol = input("請輸入台股代號 (預設為 2330): ").strip()
-    if not symbol:
-        symbol = "2330"
-        
-    timeframe = input("請選擇 K 線時間級別 (60 或 1，預設為 60 分鐘 K 線): ").strip()
-    if not timeframe:
-        timeframe = "60"
+    symbol = sys.argv[1] if len(sys.argv) > 1 else "2330"
+    timeframe = sys.argv[2] if len(sys.argv) > 2 else "60"
         
     # 2. Login to Taishin SDK
     print(f"\n[1/4] 正在登入台新證券 Nova API...")
