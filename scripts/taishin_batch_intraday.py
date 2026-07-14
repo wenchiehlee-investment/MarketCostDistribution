@@ -319,7 +319,9 @@ def main():
     print("All batch processing completed successfully!")
 
 def write_intraday_report(results, artifact_dir):
-    report_path = artifact_dir / "taishin_intraday_validation_report.md"
+    output_dir = Path(__file__).resolve().parent.parent / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "taishin_intraday_validation_report.md"
     
     table_lines = [
         "| 股票代號與名稱 | 最新收盤價 (元) | 平均成本 (元) | 中位成本 (元) | 最密集籌碼點 POC | 獲利籌碼佔比 | 套牢籌碼佔比 | 模型可信度 |",
@@ -365,6 +367,10 @@ def write_intraday_report(results, artifact_dir):
     
     report_path.write_text(markdown_content, encoding='utf-8')
     print(f"Focus report saved to: {report_path}")
+    
+    # Copy to artifact registry
+    import shutil
+    shutil.copy(str(report_path), str(artifact_dir / "taishin_intraday_validation_report.md"))
 
 if __name__ == "__main__":
     main()
