@@ -144,6 +144,7 @@ def main():
         "volume": "Volume"
     })
     df_hourly["Date"] = pd.to_datetime(df_hourly["Date"])
+    df_hourly["Volume"] = df_hourly["Volume"] * 1000
     # Sort chronologically (ascending date)
     df_hourly = df_hourly.sort_values("Date").reset_index(drop=True)
     
@@ -161,6 +162,21 @@ def main():
     corporate_actions = loader.load_corporate_actions(symbol)
     shareholder_concentration = loader.load_weekly_shareholder_concentration(symbol)
     
+    # Load daily prices for pre-hourly warming period (e.g. 7 years before)
+    df_daily_pre = pd.DataFrame()
+    try:
+        df_daily = loader.load_daily_prices(symbol)
+        # Normalize both datetimes to timezone-naive for safe comparison
+        df_daily["Date_Naive"] = pd.to_datetime(df_daily["Date"]).dt.tz_localize(None)
+        hourly_start_naive = pd.to_datetime(df_hourly.iloc[0]["Date"]).tz_localize(None)
+        df_daily_pre = df_daily[df_daily["Date_Naive"] < hourly_start_naive].copy()
+        df_daily_pre = df_daily_pre.drop(columns=["Date_Naive"])
+        
+        if not df_daily_pre.empty:
+            print(f"  * 載入 {len(df_daily_pre)} 筆日 K 線進行前期籌碼暖機 (從 {df_daily_pre['Date'].min().strftime('%Y/%m/%d')} 至 {df_daily_pre['Date'].max().strftime('%Y/%m/%d')})...")
+    except Exception as e:
+        print(f"  [Warning] 無法載入日 K 線進行暖機: {e}")
+        
     # Calculate suitable bin size based on price level
     first_price = df_hourly.iloc[0]["Close"]
     raw_size = first_price * 0.005
@@ -177,17 +193,30 @@ def main():
         
     print(f"\n[3/4] 載入基本面資料，發行股數: {shares_outstanding / 1e8:.2f} 億股")
     print(f"     價格區間間距 (Bin Size): {bin_size} 元")
-    print(f"     啟動 CostSimulator 進行高頻遞迴成本模擬 (Model v1 - Single Pool)...")
+    print(f"     啟動 CostSimulator 進行混和籌碼成本模擬 (Model v1 - Single Pool)...")
     
-    # 5. Run Intraday Simulation
+    # 5. Run Hybrid Simulation
     simulator = CostSimulator(bin_size=bin_size, model_type="single_pool")
-    history_records = simulator.run_hourly_simulation(
+    
+    daily_history = []
+    if not df_daily_pre.empty:
+        daily_history = simulator.run_daily_simulation(
+            df_prices=df_daily_pre,
+            shares_outstanding=shares_outstanding,
+            corporate_actions=corporate_actions,
+            shareholder_concentration=shareholder_concentration,
+            stock_code=symbol
+        )
+        
+    hourly_history = simulator.run_hourly_simulation(
         df_hourly=df_hourly,
         shares_outstanding=shares_outstanding,
         corporate_actions=corporate_actions,
         shareholder_concentration=shareholder_concentration,
         stock_code=symbol
     )
+    
+    history_records = daily_history + hourly_history
     print("     模擬完成！")
     
     # Calculate metrics
