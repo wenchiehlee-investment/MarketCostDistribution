@@ -14,7 +14,7 @@ class CostSimulator:
     - Dynamic bin sizing.
     - Hourly intraday data distribution (optional).
     """
-    def __init__(self, bin_size: float = 0.5, decay_multiplier: float = 1.0, stock_code: Optional[str] = None, model_type: str = "double_pool_dynamic"):
+    def __init__(self, bin_size: float = 0.5, decay_multiplier: float = 1.0, stock_code: Optional[str] = None, model_type: str = "single_pool"):
         self.bin_size = bin_size
         self.decay_multiplier = decay_multiplier
         self.stock_code = stock_code
