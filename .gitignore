@@ -12,6 +12,7 @@ env/
 data/
 output/*
 !output/*.csv
+!output/*.md
 
 
 # IDEs
