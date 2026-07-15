@@ -169,8 +169,9 @@ def main():
         df_daily = loader.load_daily_prices(symbol)
         # Normalize both datetimes to timezone-naive for safe comparison
         df_daily["Date_Naive"] = pd.to_datetime(df_daily["Date"]).dt.tz_localize(None)
-        hourly_start_naive = pd.to_datetime(df_hourly.iloc[0]["Date"]).tz_localize(None)
-        df_daily_pre = df_daily[df_daily["Date_Naive"] < hourly_start_naive].copy()
+        # Use normalize() to get 00:00:00 of the hourly start day to prevent double-simulating the transition day
+        hourly_start_day = pd.to_datetime(df_hourly.iloc[0]["Date"]).normalize().tz_localize(None)
+        df_daily_pre = df_daily[df_daily["Date_Naive"] < hourly_start_day].copy()
         df_daily_pre = df_daily_pre.drop(columns=["Date_Naive"])
         
         if not df_daily_pre.empty:
@@ -194,10 +195,10 @@ def main():
         
     print(f"\n[3/4] 載入基本面資料，發行股數: {shares_outstanding / 1e8:.2f} 億股")
     print(f"     價格區間間距 (Bin Size): {bin_size} 元")
-    print(f"     啟動 CostSimulator 進行混和籌碼成本模擬 (Model v1 - Single Pool)...")
+    print(f"     啟動 CostSimulator 進行混和籌碼成本模擬 (Model v2 - Double Pool Dynamic)...")
     
     # 5. Run Hybrid Simulation
-    simulator = CostSimulator(bin_size=bin_size, model_type="single_pool")
+    simulator = CostSimulator(bin_size=bin_size, model_type="double_pool_dynamic")
     
     daily_history = []
     if not df_daily_pre.empty:
