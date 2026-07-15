@@ -15,25 +15,14 @@ from src.data_loader import DataLoader
 from src.simulator import CostSimulator
 from src.metrics import CostMetrics
 from src.visualizer import CostVisualizer
+from src._skill_loader import load_skill_module
+
+# Shared helpers live in the deployed skill (single source of truth)
+get_company_name = load_skill_module("run_market_cost").get_company_name
 
 # Force Microsoft JhengHei for Chinese support in matplotlib
 plt.rcParams['font.family'] = 'Microsoft JhengHei'
 plt.rcParams['axes.unicode_minus'] = False
-
-def get_company_name(data_dir: Path, stock_code: str) -> str:
-    stock_code_str = str(stock_code).strip()
-    perf_csv = data_dir / "Python-Actions.GoodInfo.Analyzer" / "cleaned_performance.csv"
-    if perf_csv.exists():
-        try:
-            df = pd.read_csv(perf_csv, dtype={"stock_code": str})
-            df = df[df["stock_code"] == stock_code_str]
-            if not df.empty:
-                df_valid = df.dropna(subset=["company_name"])
-                if not df_valid.empty:
-                    return df_valid.iloc[0]["company_name"]
-        except Exception:
-            pass
-    return "個股"
 
 def main():
     loader = DataLoader()
@@ -87,26 +76,19 @@ def main():
             final_dist = simulator.distribution
             last_close = df_prices.iloc[-1]["Close"]
             metrics = CostMetrics.calculate_all(final_dist, last_close)
-            
-            # Calculate trust level
-            df_prices['Turnover'] = df_prices['Volume'] / shares_outstanding
-            avg_turnover_pct = df_prices['Turnover'].mean() * 100
-            
-            lockup_heavy = ["2412", "3045"]
-            if symbol in lockup_heavy:
-                trust_level = "中低 (Medium-Low) - 股權鎖定重"
-            elif avg_turnover_pct >= 0.4:
-                trust_level = "極高 (Very High)"
-            elif avg_turnover_pct >= 0.25:
-                trust_level = "高 (High)"
-            elif avg_turnover_pct >= 0.12:
-                trust_level = "中 (Medium)"
-            else:
-                trust_level = "低 (Low)"
-                
+
+            # Unified trust level (shared with the skill's PNG/CSV/report outputs)
+            df_hist = pd.DataFrame(history_records)
+            trust = CostMetrics.evaluate_trust(
+                df_history=df_hist,
+                total_trading_days=len(df_prices),
+                stock_code=symbol,
+                data_as_of=df_prices.iloc[-1]["Date"]
+            )
+            trust_level = trust["label"]
+
             # 4. Generate dual-panel chart
             chart_path = output_dir / f"{symbol}_cost_distribution.png"
-            df_hist = pd.DataFrame(history_records)
             CostVisualizer.plot_cost_chart(
                 df_history=df_hist,
                 final_dist=final_dist,
@@ -114,7 +96,9 @@ def main():
                 stock_code=symbol,
                 company_name=company_name,
                 save_path=chart_path,
-                shares_outstanding=shares_outstanding
+                shares_outstanding=shares_outstanding,
+                trust_level=trust_level,
+                data_as_of=trust["data_as_of"]
             )
             
             # 5. Generate percentage chart

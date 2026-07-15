@@ -9,54 +9,36 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.data_loader import DataLoader
 from src.simulator import CostSimulator
 from src.metrics import CostMetrics
+from src._skill_loader import load_skill_module
+
+# Shared helpers live in the deployed skill (single source of truth)
+get_company_name = load_skill_module("run_market_cost").get_company_name
 
 # Set font for Traditional Chinese support on Windows
 plt.rcParams['font.family'] = 'Microsoft JhengHei'
 plt.rcParams['axes.unicode_minus'] = False
 
-def get_company_name(data_dir: Path, stock_code: str) -> str:
-    stock_code_str = str(stock_code).strip()
-    perf_csv = data_dir / "Python-Actions.GoodInfo.Analyzer" / "cleaned_performance.csv"
-    if perf_csv.exists():
-        try:
-            df = pd.read_csv(perf_csv, dtype={"stock_code": str})
-            df = df[df["stock_code"] == stock_code_str]
-            if not df.empty:
-                df_valid = df.dropna(subset=["company_name"])
-                if not df_valid.empty:
-                    return df_valid.iloc[0]["company_name"]
-        except Exception:
-            pass
-    return "個股"
-
 def main():
     loader = DataLoader()
     symbol = sys.argv[1] if len(sys.argv) > 1 else "2330"
     company_name = get_company_name(loader.data_dir, symbol)
-    
+
     # Load data
     df_prices = loader.load_daily_prices(symbol)
     shares_outstanding = loader.load_shares_outstanding(symbol)
-    
-    # Calculate average daily turnover and trust level
-    df_prices['Turnover'] = df_prices['Volume'] / shares_outstanding
-    avg_turnover_pct = df_prices['Turnover'].mean() * 100
-    
-    lockup_heavy = ["2412", "3045"]
-    if symbol in lockup_heavy:
-        trust_level = "中低 (Medium-Low) - 股權鎖定重"
-    elif avg_turnover_pct >= 0.4:
-        trust_level = "極高 (Very High)"
-    elif avg_turnover_pct >= 0.25:
-        trust_level = "高 (High)"
-    elif avg_turnover_pct >= 0.12:
-        trust_level = "中 (Medium)"
-    else:
-        trust_level = "低 (Low)"
-        
+
     # Run simulation
     simulator = CostSimulator(bin_size=5.0)
-    simulator.run_daily_simulation(df_prices, shares_outstanding, [])
+    history_records = simulator.run_daily_simulation(df_prices, shares_outstanding, [])
+
+    # Unified trust level (shared with the skill's outputs)
+    trust = CostMetrics.evaluate_trust(
+        df_history=pd.DataFrame(history_records),
+        total_trading_days=len(df_prices),
+        stock_code=symbol,
+        data_as_of=df_prices.iloc[-1]["Date"]
+    )
+    trust_level = trust["label"]
     
     # Calculate metrics
     final_dist = simulator.distribution
