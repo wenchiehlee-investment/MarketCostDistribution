@@ -204,7 +204,9 @@ def main():
             df_daily["Date_Naive"] = pd.to_datetime(df_daily["Date"]).dt.tz_localize(None)
             # Use normalize() to get 00:00:00 of the hourly start day to prevent double-simulating the transition day
             hourly_start_day = pd.to_datetime(df_hourly.iloc[0]["Date"]).normalize().tz_localize(None)
-            df_daily_pre = df_daily[df_daily["Date_Naive"] < hourly_start_day].copy()
+            # Limit the warming period to at most 10 years to prevent ancient bins (from 15-25 years ago) from dominating
+            ten_years_ago = hourly_start_day - pd.DateOffset(years=10)
+            df_daily_pre = df_daily[(df_daily["Date_Naive"] >= ten_years_ago) & (df_daily["Date_Naive"] < hourly_start_day)].copy()
             df_daily_pre = df_daily_pre.drop(columns=["Date_Naive"])
             
             if not df_daily_pre.empty:
@@ -231,18 +233,29 @@ def main():
         try:
             simulator = CostSimulator(bin_size=bin_size, model_type="double_pool_dynamic")
             
-            # Step A: Warm up with daily data
+            # Step A: Warm up with daily data (pre-adjusted scale)
             daily_history = []
             if not df_daily_pre.empty:
                 daily_history = simulator.run_daily_simulation(
                     df_prices=df_daily_pre,
                     shares_outstanding=shares_outstanding,
-                    corporate_actions=corporate_actions,
+                    corporate_actions=[],  # Pass empty actions: daily prices are already pre-adjusted in the CSV
                     shareholder_concentration=shareholder_concentration,
                     stock_code=symbol
                 )
                 
-            # Step B: Continue with hourly data
+            # Transition scaling: scale daily bins up to match the hourly unadjusted start price
+            if not df_daily_pre.empty and not df_hourly.empty:
+                daily_end_price = df_daily_pre.iloc[-1]["Close"]
+                hourly_start_price = df_hourly.iloc[0]["Close"]
+                if daily_end_price > 0:
+                    scale_factor = hourly_start_price / daily_end_price
+                    # Scale both active and core distributions
+                    simulator.active_dist = {simulator.get_bin(p * scale_factor): w for p, w in simulator.active_dist.items()}
+                    simulator.core_dist = {simulator.get_bin(p * scale_factor): w for p, w in simulator.core_dist.items()}
+                    simulator.update_main_distribution()
+                
+            # Step B: Continue with hourly data (starts unadjusted, corporate actions are applied dynamically)
             hourly_history = simulator.run_hourly_simulation(
                 df_hourly=df_hourly,
                 shares_outstanding=shares_outstanding,
