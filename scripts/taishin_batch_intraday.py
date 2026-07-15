@@ -197,6 +197,7 @@ def main():
         
         # Load daily prices for pre-hourly warming period (e.g. 7 years before)
         df_daily_pre = pd.DataFrame()
+        df_daily = pd.DataFrame()
         try:
             df_daily = loader.load_daily_prices(symbol)
             # Normalize both datetimes to timezone-naive for safe comparison
@@ -276,7 +277,11 @@ def main():
             avg_turnover_pct = df_prices_daily['Turnover'].mean() * 100
             
             lockup_heavy = ["2412", "3045"]
-            if symbol in lockup_heavy:
+            total_trading_days = len(df_daily) if not df_daily.empty else 0
+            
+            if total_trading_days < 1000:
+                trust_level = "極低 (Very Low) - 新上市歷史過短"
+            elif symbol in lockup_heavy:
                 trust_level = "中低 (Medium-Low) - 股權鎖定重"
             elif avg_turnover_pct >= 0.4:
                 trust_level = "極高 (Very High)"

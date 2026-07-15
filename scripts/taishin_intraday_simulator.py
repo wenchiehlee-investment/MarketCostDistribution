@@ -164,6 +164,7 @@ def main():
     
     # Load daily prices for pre-hourly warming period (e.g. 7 years before)
     df_daily_pre = pd.DataFrame()
+    df_daily = pd.DataFrame()
     try:
         df_daily = loader.load_daily_prices(symbol)
         # Normalize both datetimes to timezone-naive for safe comparison
