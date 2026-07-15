@@ -271,7 +271,9 @@ def main():
             )
             
             # Save Raw CSV
-            csv_path = output_dir / f"{symbol}_cost_distribution_taishin.csv"
+            csv_dir = output_dir / "csv"
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / f"{symbol}_cost_distribution_taishin.csv"
             df_prices_daily = df_hourly.copy()
             df_prices_daily['Turnover'] = df_prices_daily['Volume'] / shares_outstanding
             avg_turnover_pct = df_prices_daily['Turnover'].mean() * 100
