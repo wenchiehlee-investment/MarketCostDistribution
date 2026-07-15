@@ -41,7 +41,9 @@ class CostVisualizer:
         stock_code: str,
         company_name: str,
         save_path: Path,
-        shares_outstanding: Optional[float] = None
+        shares_outstanding: Optional[float] = None,
+        trust_level: Optional[str] = None,
+        data_as_of: Optional[str] = None
     ):
         """
         Plots a professional dual-panel chart:
@@ -119,22 +121,25 @@ class CostVisualizer:
         ax_cost.set_title("籌碼成本分佈區 (綠:獲利 / 紅:套牢)", fontsize=11, fontweight='bold')
         ax_cost.set_xlabel("佔比 (%)", fontsize=10)
 
-        # Calculate trust level using pre-calculated Turnover_Rate in df_history
-        trust_level = "未知 (Unknown)"
-        if "Turnover_Rate" in df_history.columns:
-            avg_turnover_pct = df_history['Turnover_Rate'].mean() * 100
-            
-            lockup_heavy = ["2412", "3045"]
-            if stock_code in lockup_heavy:
-                trust_level = "中低 (Medium-Low) - 股權鎖定重"
-            elif avg_turnover_pct >= 0.4:
-                trust_level = "極高 (Very High)"
-            elif avg_turnover_pct >= 0.25:
-                trust_level = "高 (High)"
-            elif avg_turnover_pct >= 0.12:
-                trust_level = "中 (Medium)"
-            else:
-                trust_level = "低 (Low)"
+        # Trust level: prefer the caller-supplied label (single source of truth in
+        # CostMetrics.evaluate_trust); fall back to the legacy turnover-only rule
+        # for old callers that do not pass one.
+        if trust_level is None:
+            trust_level = "未知 (Unknown)"
+            if "Turnover_Rate" in df_history.columns:
+                avg_turnover_pct = df_history['Turnover_Rate'].mean() * 100
+
+                lockup_heavy = ["2412", "3045"]
+                if stock_code in lockup_heavy:
+                    trust_level = "中低 (Medium-Low) - 股權鎖定重"
+                elif avg_turnover_pct >= 0.4:
+                    trust_level = "極高 (Very High)"
+                elif avg_turnover_pct >= 0.25:
+                    trust_level = "高 (High)"
+                elif avg_turnover_pct >= 0.12:
+                    trust_level = "中 (Medium)"
+                else:
+                    trust_level = "低 (Low)"
 
         # Add text box with metrics summary
         summary_text = (
@@ -146,6 +151,8 @@ class CostVisualizer:
             f"套牢籌碼比: {metrics['Loss_Ratio']*100:.1f}%\n"
             f"模型可信度: {trust_level}"
         )
+        if data_as_of:
+            summary_text += f"\n資料截至: {data_as_of}"
         
         # Place text box on the price chart
         props = dict(boxstyle='round', facecolor='wheat', alpha=0.3)
