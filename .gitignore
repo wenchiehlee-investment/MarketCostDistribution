@@ -13,7 +13,6 @@ data/
 output/*
 !output/csv/
 !output/csv/*.csv
-!output/*.csv
 !output/*.md
 
 
