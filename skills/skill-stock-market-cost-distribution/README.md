@@ -1,4 +1,4 @@
-# skill-market-cost-distribution
+# skill-stock-market-cost-distribution
 
 台股市場籌碼持股成本分佈模擬技能。詳細指令與輸出契約見 [SKILL.md](SKILL.md)。
 
@@ -16,7 +16,7 @@ python scripts/run_market_cost.py --symbol 2330 --data-dir ... --output-dir ...
 ## 檔案結構
 
 ```
-skill-market-cost-distribution/
+skill-stock-market-cost-distribution/
   SKILL.md            # 技能指令與輸出契約
   metadata.json       # 版本與來源 metadata
   scripts/

@@ -1,5 +1,5 @@
 ---
-name: skill-market-cost-distribution
+name: skill-stock-market-cost-distribution
 description: 台股市場籌碼持股成本分佈模擬 — 台新 Nova API 小時 K 搭配 Yahoo 日 K 暖機的雙池衰減模型，輸出一致格式的 PNG 圖與 CSV 分佈檔，附統一的模型可信度與資料新鮮度標籤。
 ---
 
@@ -31,7 +31,7 @@ description: 台股市場籌碼持股成本分佈模擬 — 台新 Nova API 小�
 ## 使用範例
 
 ```bash
-python skills/common/skill-market-cost-distribution/scripts/run_market_cost.py \
+python skills/common/skill-stock-market-cost-distribution/scripts/run_market_cost.py \
   --list  C:/Users/WJLEE/SynologyDrive/NAS/github.com/MarketCostDistribution/StockID_TWSE_TPEX.csv \
   --data-dir  C:/Users/WJLEE/SynologyDrive/NAS/github.com/MarketCostDistribution/data \
   --output-dir C:/Users/WJLEE/SynologyDrive/NAS/github.com/MarketCostDistribution/output \
